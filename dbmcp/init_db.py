@@ -10,7 +10,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, Field, field_validator
@@ -19,6 +20,9 @@ DATABASE_PATH = Path(os.environ.get("KITCHEN_DB_PATH", Path(__file__).with_name(
 VALID_DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 allowed_hosts = [host.strip() for host in os.environ.get("MCP_ALLOWED_HOSTS", "localhost:18000,127.0.0.1:18000,dbmcp:18000,kitchenhq-db-mcp:18000").split(",") if host.strip()]
 mcp = FastMCP("KitchenHQ Database", transport_security=TransportSecuritySettings(allowed_hosts=allowed_hosts))
+
+API_KEY_HEADER = "X-API-Key"
+PUBLIC_PATHS = {"/api/health"}
 
 
 def _connect() -> sqlite3.Connection:
@@ -142,6 +146,11 @@ def initialize_database() -> None:
                 error TEXT,
                 started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 finished_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                messages_json TEXT NOT NULL DEFAULT '[]',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
@@ -542,18 +551,31 @@ class MenuPlanRequest(BaseModel):
     menu_items: list[dict[str, Any]] = Field(min_length=5)
 
 
+class ChatSessionRequest(BaseModel):
+    messages: list[dict[str, Any]]
+
+
 def _tool_error(error: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(error))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if not os.environ.get("KITCHENHQ_API_KEY"):
+        raise RuntimeError("KITCHENHQ_API_KEY must be set")
     initialize_database()
     async with mcp.session_manager.run():
         yield
 
 
 app = FastAPI(title="KitchenHQ Database Tools", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if request.url.path not in PUBLIC_PATHS and request.headers.get(API_KEY_HEADER) != os.environ.get("KITCHENHQ_API_KEY"):
+        return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -679,6 +701,24 @@ def api_add_menu_plan(request: MenuPlanRequest) -> dict[str, Any]:
         return add_weekly_menu_plan(request.menu_items)
     except ValueError as error:
         raise _tool_error(error) from error
+
+
+@app.get("/api/chat-sessions/{session_id}")
+def api_get_chat_session(session_id: str) -> dict[str, Any]:
+    with _connect() as connection:
+        row = connection.execute("SELECT messages_json FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
+    return {"messages": json.loads(row["messages_json"]) if row else []}
+
+
+@app.put("/api/chat-sessions/{session_id}")
+def api_put_chat_session(session_id: str, request: ChatSessionRequest) -> dict[str, Any]:
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO chat_sessions (session_id, messages_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(session_id) DO UPDATE SET messages_json = excluded.messages_json, updated_at = CURRENT_TIMESTAMP",
+            (session_id, json.dumps(request.messages)),
+        )
+    return {"session_id": session_id, "messages": request.messages}
 
 
 app.mount("/", mcp.streamable_http_app())

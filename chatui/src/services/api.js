@@ -1,10 +1,19 @@
+const API_KEY_STORAGE_KEY = 'kitchenhq.api_key';
+
+export const getApiKey = () => window.localStorage.getItem(API_KEY_STORAGE_KEY) || '';
+export const setApiKey = (key) => window.localStorage.setItem(API_KEY_STORAGE_KEY, key);
+export const clearApiKey = () => window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+
 const request = async (path, options = {}) => {
   const response = await fetch(`/api${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': getApiKey(), ...options.headers },
     ...options,
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || 'Kitchen service unavailable');
+  if (!response.ok) {
+    if (response.status === 401) clearApiKey();
+    throw new Error(data.detail || 'Kitchen service unavailable');
+  }
   return data;
 };
 

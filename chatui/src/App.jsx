@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import PageHeader from './components/PageHeader';
+import AccessGate from './components/AccessGate';
 import Dashboard from './pages/Dashboard';
 import Pantry from './pages/Pantry';
 import WeeklyMenu from './pages/WeeklyMenu';
 import TaskList from './pages/TaskList';
 import Chat from './pages/Chat';
-import { kitchenApi } from './services/api';
+import { kitchenApi, getApiKey, setApiKey } from './services/api';
 
 const pageMeta = {
   dashboard: ['Good morning, Alex', 'Your kitchen at a glance'],
@@ -19,12 +20,24 @@ const pageMeta = {
 const fallback = { inventory: [], menu: [], tasks: [], shopping_lists: [] };
 
 export default function App() {
+  const [unlocked, setUnlocked] = useState(() => Boolean(getApiKey()));
+  const [gateError, setGateError] = useState('');
   const [page, setPage] = useState('dashboard');
   const [data, setData] = useState(fallback);
   const [error, setError] = useState('');
   const [mobileNav, setMobileNav] = useState(false);
-  const load = async () => { try { setError(''); setData(await kitchenApi.getDashboard()); } catch (requestError) { setError(requestError.message); } };
-  useEffect(() => { load(); }, []);
+  const load = async () => {
+    try {
+      setError('');
+      setData(await kitchenApi.getDashboard());
+    } catch (requestError) {
+      if (!getApiKey()) { setUnlocked(false); setGateError('That access key was not accepted.'); return; }
+      setError(requestError.message);
+    }
+  };
+  useEffect(() => { if (unlocked) load(); }, [unlocked]);
+  const unlock = (key) => { setApiKey(key); setGateError(''); setUnlocked(true); };
+  if (!unlocked) return <AccessGate onSubmit={unlock} error={gateError} />;
   const update = (next) => setData((current) => ({ ...current, ...next }));
   const adjust = async (id, change) => { try { const item = await kitchenApi.adjustInventory(id, change); update({ inventory: data.inventory.map((entry) => entry.id === id ? item : entry) }); } catch (e) { setError(e.message); } };
   const discard = async (item) => { const amount = Number(prompt(`How much ${item.item_name} should be discarded?`, '1')); if (!amount) return; try { const updated = await kitchenApi.discardInventory(item.id, amount, 'Pantry check'); update({ inventory: data.inventory.map((entry) => entry.id === item.id ? updated : entry) }); } catch (e) { setError(e.message); } };

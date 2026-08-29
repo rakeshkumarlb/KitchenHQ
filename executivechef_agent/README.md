@@ -4,7 +4,7 @@ This is a standalone LangChain agent that uses the KitchenHQ database through th
 
 ## Run with Docker
 
-Copy `executivechef_agent/.env.example` to `executivechef_agent/.env`, set `OPENAI_API_KEY`, then start both services from the repository root:
+Copy `executivechef_agent/.env.example` to `executivechef_agent/.env`, set `OPENAI_API_KEY` and `KITCHENHQ_API_KEY` (must match the `dbmcp` service's key), then start both services from the repository root:
 
 ```powershell
 docker compose up --build
@@ -14,7 +14,7 @@ The agent container is interactive. Type requests such as `show me low-stock ing
 
 ## Run the agent locally
 
-Start the existing `dbmcp` container, set `MCP_URL=http://localhost:8000/mcp`, install `executivechef_agent/requirements.txt`, and run:
+Start the existing `dbmcp` container, set `MCP_URL=http://localhost:18000/mcp` and `KITCHENHQ_API_KEY`, install `executivechef_agent/requirements.txt`, and run:
 
 ```powershell
 python executivechef_agent/agent.py

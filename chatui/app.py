@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from inspect import isawaitable
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import httpx
@@ -30,6 +30,8 @@ class ChatResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not os.environ.get("KITCHENHQ_API_KEY"):
+        raise RuntimeError("KITCHENHQ_API_KEY must be set")
     agent = KitchenHQAgent()
     await agent.start()
     app.state.agent = agent
@@ -47,6 +49,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KitchenHQ Executive Chef", lifespan=lifespan)
 DB_API_URL = os.environ.get("DB_API_URL", "http://dbmcp:18000")
+API_KEY_HEADER = "X-API-Key"
+PUBLIC_PATHS = {"/api/health"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in PUBLIC_PATHS:
+        if request.headers.get(API_KEY_HEADER) != os.environ.get("KITCHENHQ_API_KEY"):
+            return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    return await call_next(request)
 
 
 @app.get("/", response_class=FileResponse)
@@ -60,8 +72,9 @@ async def health() -> dict[str, str]:
 
 
 async def db_request(method: str, path: str, payload: dict | None = None) -> dict:
+    headers = {API_KEY_HEADER: os.environ.get("KITCHENHQ_API_KEY", "")}
     async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.request(method, f"{DB_API_URL}{path}", json=payload)
+        response = await client.request(method, f"{DB_API_URL}{path}", json=payload, headers=headers)
     if response.is_error:
         detail = response.json().get("detail", "Database service unavailable")
         raise HTTPException(status_code=response.status_code, detail=detail)

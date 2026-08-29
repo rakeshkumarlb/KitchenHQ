@@ -18,6 +18,7 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain_core.messages import messages_from_dict, messages_to_dict
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,39 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger("kitchenhq-agent")
+
+DB_API_URL = os.getenv("DB_API_URL", "http://dbmcp:18000")
+
+
+def _db_api_headers() -> dict[str, str]:
+    return {"X-API-Key": os.getenv("KITCHENHQ_API_KEY", "")}
+
+
+async def _load_history(session_id: str) -> list[Any]:
+    """Fetch a session's chat history from dbmcp; empty on any failure or first use."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{DB_API_URL}/api/chat-sessions/{session_id}", headers=_db_api_headers())
+            response.raise_for_status()
+        return messages_from_dict(response.json()["messages"])
+    except Exception:
+        logger.warning("Could not load chat history for session %s", session_id, exc_info=True)
+        return []
+
+
+async def _save_history(session_id: str, messages: list[Any]) -> None:
+    """Persist a session's chat history to dbmcp; a storage outage must not fail the turn."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.put(
+                f"{DB_API_URL}/api/chat-sessions/{session_id}",
+                json={"messages": messages_to_dict(messages)},
+                headers=_db_api_headers(),
+            )
+            response.raise_for_status()
+    except Exception:
+        logger.warning("Could not persist chat history for session %s", session_id, exc_info=True)
+
 
 PROMPT_PATH = Path(__file__).with_name("prompt.md")
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8") + """
@@ -121,16 +155,19 @@ class KitchenHQAgent:
             raise ValueError(f"Unsupported agent role: {role}")
         self.role = role
         self.model = _build_model()
+        api_key = os.getenv("KITCHENHQ_API_KEY")
+        if not api_key:
+            raise RuntimeError("KITCHENHQ_API_KEY must be set")
         self.client = MultiServerMCPClient(
             {
                 "kitchenhq": {
                     "transport": os.getenv("MCP_TRANSPORT", "streamable_http"),
                     "url": os.getenv("MCP_URL", "http://localhost:18000/mcp"),
+                    "headers": {"X-API-Key": api_key},
                 }
             }
         )
         self._agent = None
-        self._messages_by_session: dict[str, list[Any]] = {}
         self._agent_lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -173,10 +210,8 @@ class KitchenHQAgent:
         if self._agent is None:
             raise RuntimeError("Agent has not been started")
         async with self._agent_lock:
-            messages = [
-                *self._messages_by_session.get(session_id, []),
-                {"role": "user", "content": text},
-            ]
+            history = await _load_history(session_id) if remember else []
+            messages = [*history, {"role": "user", "content": text}]
             if trace:
                 result_messages = await self._stream_agent(messages)
                 structured_response = None
@@ -185,7 +220,7 @@ class KitchenHQAgent:
                 result_messages = result["messages"]
                 structured_response = result.get("structured_response")
             if remember:
-                self._messages_by_session[session_id] = result_messages
+                await _save_history(session_id, result_messages)
             if trace:
                 return self._format_trace(result_messages)
             if structured_response is not None:
@@ -307,8 +342,9 @@ async def _record_agent_run(agent: KitchenHQAgent, job_name: str, status: str, *
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             response = await client.post(
-                os.getenv("DB_API_URL", "http://dbmcp:18000") + "/api/agent-runs",
+                f"{DB_API_URL}/api/agent-runs",
                 json={"agent_role": agent.role, "job_name": job_name, "status": status, "result": result, "error": error},
+                headers=_db_api_headers(),
             )
             response.raise_for_status()
     except Exception:

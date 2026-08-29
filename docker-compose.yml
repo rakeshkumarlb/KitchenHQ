@@ -8,6 +8,7 @@ services:
       MCP_HOST: 0.0.0.0
       MCP_PORT: 18000
       MCP_TRANSPORT: streamable-http
+      KITCHENHQ_API_KEY: ${KITCHENHQ_API_KEY:?KITCHENHQ_API_KEY must be set}
     ports:
       - "18000:18000"
     volumes:
@@ -26,6 +27,7 @@ services:
     environment:
       MCP_URL: http://dbmcp:18000/mcp
       MCP_TRANSPORT: streamable_http
+      KITCHENHQ_API_KEY: ${KITCHENHQ_API_KEY:?KITCHENHQ_API_KEY must be set}
     ports:
       - "8080:8080"
 
@@ -43,5 +45,6 @@ services:
       MCP_URL: http://dbmcp:18000/mcp
       MCP_TRANSPORT: streamable_http
       TZ: ${KITCHEN_TIMEZONE:-Asia/Kolkata}
+      KITCHENHQ_API_KEY: ${KITCHENHQ_API_KEY:?KITCHENHQ_API_KEY must be set}
     command: ["python", "worker.py"]
 
