@@ -1,0 +1,47 @@
+services:
+  dbmcp:
+    build:
+      context: ./dbmcp
+    container_name: kitchenhq-db-mcp
+    environment:
+      KITCHEN_DB_PATH: /data/kitchen.db
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 18000
+      MCP_TRANSPORT: streamable-http
+    ports:
+      - "18000:18000"
+    volumes:
+      - "${KITCHEN_DB_HOST_PATH:-./data}:/data"
+
+  chatui:
+    build:
+      context: .
+      dockerfile: ./chatui/Dockerfile
+    container_name: kitchenhq-chatui
+    depends_on:
+      - dbmcp
+    env_file:
+      - path: ./executivechef_agent/.env
+        required: false
+    environment:
+      MCP_URL: http://dbmcp:18000/mcp
+      MCP_TRANSPORT: streamable_http
+    ports:
+      - "8080:8080"
+
+  agent-worker:
+    build:
+      context: ./executivechef_agent
+      dockerfile: Dockerfile
+    container_name: kitchenhq-agent-worker
+    depends_on:
+      - dbmcp
+    env_file:
+      - path: ./executivechef_agent/.env
+        required: false
+    environment:
+      MCP_URL: http://dbmcp:18000/mcp
+      MCP_TRANSPORT: streamable_http
+      TZ: ${KITCHEN_TIMEZONE:-Asia/Kolkata}
+    command: ["python", "worker.py"]
+

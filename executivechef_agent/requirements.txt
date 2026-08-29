@@ -1,0 +1,6 @@
+APScheduler>=3.10,<4
+langchain>=1.0,<2
+langchain-mcp-adapters>=0.1.9
+langchain-openai>=1.0,<2
+langchain-ollama>=1.0,<2
+python-dotenv>=1.0,<2

@@ -1,0 +1,12 @@
+APScheduler
+langchain-community
+langchain
+langchain-mcp-adapters
+langchain-openai
+langchain_ollama
+slack-bolt
+dotenv
+mcp<2
+fastapi
+httpx
+uvicorn[standard]
