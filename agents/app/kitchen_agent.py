@@ -16,6 +16,7 @@ from langchain.agents import create_agent
 from pydantic import BaseModel
 
 from .config import Settings
+from .constants import DAYS, MEAL_TYPES
 from .email import make_email_tools
 from .history import load_history, save_history
 from .job_context import make_job_context_tool
@@ -189,9 +190,7 @@ def _tool_shortfalls(
     return shortfalls
 
 
-_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-_MEALS = ("breakfast", "lunch", "snack", "dinner")
-_ALL_MENU_SLOTS = {(day, meal) for day in _WEEKDAYS for meal in _MEALS}
+_ALL_MENU_SLOTS = {(day, meal) for day in DAYS for meal in MEAL_TYPES}
 
 
 def _weekly_menu_slot_shortfall(messages: list[Any]) -> list[str]:

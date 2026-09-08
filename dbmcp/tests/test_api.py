@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -16,12 +15,13 @@ TEST_API_KEY = "test-key"
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("KITCHEN_DB_PATH", str(tmp_path / "kitchen.db"))
     monkeypatch.setenv("KITCHENHQ_API_KEY", TEST_API_KEY)
-    import init_db
 
-    importlib.reload(init_db)  # re-resolve DATABASE_PATH against this test's tmp_path
     from fastapi.testclient import TestClient
+    from kitchendb import create_app
 
-    with TestClient(init_db.app) as test_client:
+    # A fresh app (and MCP session manager) per test; connect() reads KITCHEN_DB_PATH
+    # dynamically, so each case gets its own temp database.
+    with TestClient(create_app()) as test_client:
         test_client.headers.update({"X-API-Key": TEST_API_KEY})
         yield test_client
 
@@ -384,6 +384,24 @@ def test_dashboard_caps_completed_tasks_at_ten(client):
     completed = [row for row in dashboard["tasks"] if row["is_completed"]]
     assert len(completed) == 10
     assert {json.loads(row["detailed_instructions"])[0] for row in completed} == {f"job {index}" for index in range(2, 12)}
+
+
+def test_dashboard_includes_day_meal_constants(client):
+    constants = client.get("/api/dashboard").json()["constants"]
+    assert constants["days"] == ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    assert constants["meal_types"] == ["breakfast", "lunch", "snack", "dinner"]
+    assert constants["day_order"]["monday"] == 1
+    assert constants["meal_type_order"]["dinner"] == 4
+
+
+def test_constants_py_matches_shared_canonical_copy():
+    vendored = Path(__file__).resolve().parent.parent / "constants.py"
+    shared = Path(__file__).resolve().parent.parent.parent / "shared" / "constants.py"
+    if not shared.exists():
+        pytest.skip("shared/ not present (standalone dbmcp checkout)")
+    assert vendored.read_bytes() == shared.read_bytes(), (
+        "dbmcp/constants.py has drifted from shared/constants.py — run `python shared/sync.py`"
+    )
 
 
 def test_chat_session_roundtrip(client):

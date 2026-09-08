@@ -1,8 +1,10 @@
-"""Fetch the stored data an email needs when the agent omits it from the payload:
-the saved weekly menu (for `send_weekly_plan_email` without `days`) and the pending
-shopping items (for `send_shopping_list_email` without `items`).
+"""Fetch the saved weekly menu for ``send_weekly_plan_email`` when the agent omits
+``days``.
 
-Both come from dbmcp's `GET /api/dashboard` - the agent never touches the DB directly.
+That email summarizes a whole week and sending it is not an enforced job step, so it
+is built from dbmcp's stored menu (``GET /api/dashboard``) rather than trusting the
+model to re-emit all 28 slots. The prep and shopping-list emails carry data the agent
+authored in the same run, so they have no back-fill - the agent passes it in the call.
 """
 
 from __future__ import annotations
@@ -13,13 +15,9 @@ from typing import Any
 import httpx
 
 from ..config import Settings
+from ..constants import DAY_ORDER as _WEEKDAY_ORDER, MEAL_TYPE_ORDER as _MEAL_ORDER
 
 logger = logging.getLogger("kitchenhq-agent")
-
-_WEEKDAY_ORDER = {day: i for i, day in enumerate(
-    ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-)}
-_MEAL_ORDER = {"breakfast": 0, "lunch": 1, "snack": 2, "dinner": 3}
 
 
 def _dashboard(settings: Settings) -> dict[str, Any]:
@@ -33,7 +31,7 @@ def _dashboard(settings: Settings) -> dict[str, Any]:
         data = response.json()
         return data if isinstance(data, dict) else {}
     except Exception:
-        logger.warning("Could not fetch dashboard for email back-fill", exc_info=True)
+        logger.warning("Could not fetch dashboard for weekly-plan email back-fill", exc_info=True)
         return {}
 
 
@@ -53,16 +51,3 @@ def fetch_weekly_menu_days(settings: Settings) -> list[dict[str, Any]]:
         meals = sorted(by_day[day], key=lambda m: _MEAL_ORDER.get(m["meal_type"], 99))
         days.append({"day_of_week": day, "meals": meals})
     return days
-
-
-def fetch_shopping_items(settings: Settings) -> list[dict[str, Any]]:
-    """The currently pending shopping items, shaped for the email schema."""
-    return [
-        {
-            "item_name": item.get("item_name", ""),
-            "proposed_quantity": item.get("proposed_quantity", 0),
-            "unit": item.get("unit", ""),
-            "reason": "",
-        }
-        for item in _dashboard(settings).get("shopping_items") or []
-    ]

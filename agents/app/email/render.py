@@ -12,10 +12,7 @@ import re
 from html import escape
 from typing import Any
 
-_WEEKDAY_ORDER = {day: i for i, day in enumerate(
-    ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-)}
-_MEAL_ORDER = {"breakfast": 0, "lunch": 1, "snack": 2, "dinner": 3}
+from ..constants import DAY_ORDER as _WEEKDAY_ORDER, MEAL_TYPE_ORDER as _MEAL_ORDER
 
 _ENUM_PREFIX = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
 

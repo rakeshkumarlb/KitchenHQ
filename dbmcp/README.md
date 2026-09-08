@@ -36,13 +36,21 @@ that sends mail, and none of it needed the database directly (it back-fills the 
 menu / shopping list over this service's REST API). dbmcp has no `SMTP_*` variables
 and no `/api/notifications/*` routes.
 
-### Soft-deleted / unused endpoints
+### Code layout
 
-`POST /api/weekly-menu/plan` (and `add_weekly_menu_plan`) and `POST /api/weekly-menu/validate`
-are commented out in `init_db.py` — nothing calls them (chatui builds the week
-slot-by-slot; the agent uses the `validate_weekly_menu_policy` MCP tool, which stays).
+`init_db.py` is a thin compatibility shim (`uvicorn init_db:app`, `python init_db.py`,
+`from init_db import DATABASE_PATH`). The implementation is the `kitchendb/` package:
+`config` / `db` / `schema` / `seed` / `validation` / `models`, `tools/` (data operations
+by domain — each an MCP tool and/or a REST handler), `routes.py`, and `server.py`
+(`create_app()`). The fresh-start DDL is `schema.sql`. `constants.py` (day / meal-type
+vocabulary + ordering) is a vendored copy of `../shared/constants.py` — edit the shared
+file and run `python ../shared/sync.py`; a test fails if this copy drifts. Those values
+are also served to clients in the `constants` block of `GET /api/dashboard`. There is no
+in-place migration of older databases — a database is assumed empty or already on the
+current schema.
+
 The inventory-mutation REST routes (`POST /api/inventory`, `PATCH /api/inventory/{id}`,
-`POST /api/inventory/{id}/discard`) remain: pytest exercises them and they mirror live
+`POST /api/inventory/{id}/discard`) are kept: pytest exercises them and they mirror live
 MCP tools, even though the read-only chatui Pantry page no longer calls them.
 
 ## Backups
