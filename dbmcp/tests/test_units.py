@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from units import canonicalize_inventory_unit, convert, normalize_unit
+from kitchendb.units import canonicalize_inventory_unit, convert, normalize_unit
 
 
 @pytest.mark.parametrize(

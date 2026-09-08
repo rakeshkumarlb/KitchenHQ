@@ -2,8 +2,7 @@ import { BookOpen, ChevronRight, CircleCheck, RefreshCw, Star, X } from 'lucide-
 import { useState } from 'react';
 import { parseLines, previewLine, formatMenuDate } from '../services/menuContent';
 
-const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-const mealTypes = ['Breakfast', 'Lunch', 'Snack', 'Dinner'];
+const titleCase = (value) => value.charAt(0).toUpperCase() + value.slice(1);
 
 function RecipeModal({ item, onClose }) {
 	if (!item) return null;
@@ -26,6 +25,9 @@ function RecipeModal({ item, onClose }) {
 }
 
 export default function WeeklyMenu({ data, onRate, onRefresh }) {
+	// Day / meal vocabulary comes from GET /api/dashboard (source: shared/constants.py).
+	const days = data.constants?.days ?? [];
+	const mealTypes = (data.constants?.meal_types ?? []).map(titleCase);
 	const [selectedRecipe, setSelectedRecipe] = useState(null);
 	const [refreshing, setRefreshing] = useState(false);
 	const refresh = async () => {

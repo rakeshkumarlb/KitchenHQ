@@ -33,9 +33,10 @@ Set `LLM_PROVIDER=ollama` and `OLLAMA_BASE_URL` to use Ollama instead of OpenAI.
 `app/email/` owns outbound mail (moved here from dbmcp — the agent is the only
 process that sends it). One responsibility per module: `schemas` (payload contracts),
 `smtp` (transport + recipient resolution), `render` (subject + text + HTML bodies),
-`backfill` (fetch the saved menu / shopping items from dbmcp REST), `tools`
-(`make_email_tools(settings)`, wired into every run by `kitchen_agent.run_agent` next
-to `get_job_context`).
+`backfill` (fetch the saved menu for the weekly-plan email — the only email that still
+reads the DB), `tools` (`make_email_tools(settings)`, wired into every run by
+`kitchen_agent.run_agent` next to `get_job_context`). The prep and shopping-list
+emails take the data the agent just authored and only render + send it.
 
 The three tools — `send_prep_task_email`, `send_weekly_plan_email`,
 `send_shopping_list_email` — send one multipart (plain-text + HTML) message to the
@@ -43,5 +44,7 @@ household Profile address. Config is env-only: `SMTP_HOST`, `SMTP_PORT` (default
 465 with `SMTP_SSL=true`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_SSL`,
 `SMTP_STARTTLS` (default true unless SSL), `SMTP_TIMEOUT`. With `SMTP_HOST` unset the
 tools return `{"sent": false, "skipped": ...}` and jobs are unaffected;
-`notify_on_task_creation = 0` on the profile suppresses all three. The recipient and
-the saved-menu / shopping-list back-fill are fetched from dbmcp over `DB_API_URL`.
+`notify_on_task_creation = 0` on the profile suppresses all three. The recipient (from
+the household profile) and the weekly-plan email's menu back-fill are fetched from
+dbmcp over `DB_API_URL`; the prep and shopping-list emails carry data the agent passes
+in.

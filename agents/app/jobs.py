@@ -48,7 +48,7 @@ PURPOSE: propose a shopping list for whatever is running low or needed for the c
 2. Call get_inventory and get_shopping_items so you can see what's already pending.
 3. Load the weekly_menu rows for the weekdays in job.target_menu_days and work out what they will consume.
 4. Work out what is genuinely needed (below minimum_threshold or short for the week) and call add_shopping_items with it - it merges into whatever is already pending, so just call it with whatever is newly needed; there's no need to check for or avoid duplicates yourself. This save is the required outcome.
-5. Call send_shopping_list_email: items is [{item_name, proposed_quantity, unit, reason}], reasoning is the overall rationale.
+5. Call send_shopping_list_email: items is the exact list you passed to add_shopping_items in step 4, each as {item_name, proposed_quantity, unit, reason} with a short reason; reasoning is the overall rationale. The tool does not read the list itself.
 6. Reply with a two-sentence summary of what was added.""",
 }
 

@@ -8,8 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
-VALID_DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
-VALID_MEAL_TYPES = {"breakfast", "lunch", "snack", "dinner"}
+from ..constants import DAY_SET as VALID_DAYS, MEAL_TYPE_SET as VALID_MEAL_TYPES
 
 
 def validate_day(value: str) -> str:
@@ -73,8 +72,10 @@ class WeeklyPlanEmailDay(BaseModel):
 class WeeklyPlanEmailRequest(BaseModel):
     """Format 2 - Executive Chef weekly menu with reasoning and shopping needs.
 
-    `days` is optional: leave it out and the email is built from the saved weekly_menu
-    (fetched over REST), so the agent only passes its reasoning.
+    `days` is optional and normally omitted: the email is then built from the saved
+    weekly_menu (fetched over REST). This is the one email that still reads the DB -
+    it summarizes a whole week, and sending it is not an enforced job step, so it must
+    not depend on the model re-emitting all 28 slots faithfully.
     """
 
     week_start: str = Field(min_length=1)
@@ -95,10 +96,11 @@ class ShoppingListEmailItem(BaseModel):
 class ShoppingListEmailRequest(BaseModel):
     """Format 3 - Pantry Manager shopping suggestions and the reasoning behind them.
 
-    `items` is optional: leave it out and the email is built from the currently pending
-    shopping_items (fetched over REST).
+    `items` is required: the agent passes the shopping items it just added (or read
+    back with get_shopping_items). The tool only renders and sends - it does not read
+    the DB for this email.
     """
 
-    items: list[ShoppingListEmailItem] = Field(default_factory=list)
+    items: list[ShoppingListEmailItem] = Field(min_length=1)
     reasoning: list[str] = Field(min_length=1)
     notes: str = ""

@@ -1,6 +1,7 @@
-"""Wire the three email tools the agent gets each run. Validation -> back-fill ->
-render -> send, one call each. Tool names, parameters and docstrings match the
-send_*_email MCP tools they replaced, so prompts/*.md and app/jobs.py are unchanged.
+"""Wire the three email tools the agent gets each run: validate the payload, render it,
+send it. The agent passes the plan/list it just authored; only send_weekly_plan_email
+falls back to reading the saved menu (when `days` is omitted). Tool names and
+parameters match the send_*_email MCP tools they replaced.
 """
 
 from __future__ import annotations
@@ -91,22 +92,20 @@ def make_email_tools(settings: Settings) -> list[StructuredTool]:
 
     def send_shopping_list_email(
         reasoning: list[str],
-        items: list[dict[str, Any]] | None = None,
+        items: list[dict[str, Any]],
         notes: str = "",
     ) -> dict[str, Any]:
         """Email the household the shopping suggestions and why (Pantry Manager).
 
-        Send this whenever you finish adding to the shopping list. You only need:
+        Send this whenever you finish adding to the shopping list. Pass:
+          - items: the shopping items you just added - [{item_name, proposed_quantity,
+            unit, reason}], a short reason each (in a chat, read them back with
+            get_shopping_items first)
           - reasoning: the overall rationale (what's below threshold, what the upcoming
             menu needs)
-        `items` is optional - leave it out and every currently pending shopping item is
-        used. Returns {"sent": bool, ...}; a missing mailbox is reported, not raised.
+        Returns {"sent": bool, ...}; a missing mailbox is reported, not raised.
         """
-        data = _validated(ShoppingListEmailRequest, {"items": items or [], "reasoning": reasoning, "notes": notes})
-        if not data["items"]:
-            data["items"] = backfill.fetch_shopping_items(settings)
-        if not data["items"]:
-            return {"sent": False, "skipped": "no shopping items to email"}
+        data = _validated(ShoppingListEmailRequest, {"items": items, "reasoning": reasoning, "notes": notes})
         subject, text, html = render.build_shopping_list_email(data, greeting(settings))
         return send_email(subject, text, html, settings=settings)
 

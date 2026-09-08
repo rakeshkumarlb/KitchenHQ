@@ -2,7 +2,27 @@
 
 Use this schema when answering questions about KitchenHQ. Query the relevant table before making claims about stored data.
 
-This file is generated to match `dbmcp/init_db.py`'s `initialize_database()`, which is the source of truth — if the two ever disagree, trust the code.
+This file documents the schema created by `dbmcp/schema.sql` (run by
+`kitchendb/schema.py`'s `initialize_database()`), which is the source of truth — if the
+two ever disagree, trust `schema.sql`. The database is assumed to start empty or
+already on this schema; there is no in-place migration of older layouts.
+
+### Where the code lives (`dbmcp/`)
+
+| Path | Holds |
+|---|---|
+| `constants.py` | Day / meal-type vocabulary + ordering. Vendored copy of `shared/constants.py` (kept in sync by `shared/sync.py`; a test guards drift). Also served to clients in the `constants` block of `GET /api/dashboard`. |
+| `schema.sql` | The fresh-start DDL (all tables + indexes). |
+| `kitchendb/config.py` | Env config: DB path, MCP allowed hosts, API key header. |
+| `kitchendb/db.py` | `connect()` + row-fetch helpers. |
+| `kitchendb/schema.py` | Runs `schema.sql`, then seeds a fresh DB. |
+| `kitchendb/seed.py` | First-run seed data (inventory, 28 menu slots, prep tasks, profile). |
+| `kitchendb/validation.py` | Pure input validation / normalization (no DB). |
+| `kitchendb/models.py` | Pydantic request models. |
+| `kitchendb/tools/` | Data operations by domain — each an MCP tool and/or a REST handler. |
+| `kitchendb/routes.py` | The `/api/*` REST surface. |
+| `kitchendb/server.py` | `create_app()` — the FastAPI app + mounted MCP app. |
+| `init_db.py` | Thin compatibility shim (`uvicorn init_db:app`, the `python init_db.py` runner). |
 
 ## Tables
 
@@ -15,11 +35,11 @@ Tracks available ingredients and stock thresholds.
 | `item_name` | TEXT UNIQUE (case-insensitive) | Ingredient name |
 | `category` | TEXT | Ingredient category |
 | `quantity` | REAL | Quantity currently available, **in `unit`**. **May be negative** - prep acknowledgements deduct what a recipe used even when tracked stock was already at/near zero, so a shortfall stays visible until a shopping run tops it back up. |
-| `unit` | TEXT | Canonical stock unit — one of `g`, `kg`, `ml`, `l`, `pcs`. `add_inventory` rejects anything else (accepting aliases like `grams`/`litre`/`pieces` and storing the short form); a startup migration canonicalizes legacy alias spellings and folds the old `bags` seed unit onto `pcs`. Every deduction/intake converts its own quantity into this unit before touching `quantity` (see **Units of measure** below). |
+| `unit` | TEXT | Canonical stock unit — one of `g`, `kg`, `ml`, `l`, `pcs`. `add_inventory` rejects anything else (accepting aliases like `grams`/`litre`/`pieces` and storing the short form). Every deduction/intake converts its own quantity into this unit before touching `quantity` (see **Units of measure** below). |
 | `minimum_threshold` | REAL (>= 0) | Reorder threshold |
 | `last_updated` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last stock update |
 
-`init_db.py` rebuilds this table once on startup for databases created before the `quantity >= 0` CHECK was dropped (guarded on the old constraint text still being present).
+`quantity` has no `>= 0` CHECK — prep acknowledgements deduct what a recipe used even when tracked stock is already at/near zero.
 
 ### `wastage_log`
 Records discarded ingredients.
@@ -42,13 +62,13 @@ Stores planned meals for each day of the week.
 | `dish_name` | TEXT | Dish name |
 | `is_kid_friendly` | BOOLEAN | Whether the dish is kid-friendly |
 | `macros` | TEXT | Macronutrient information |
-| `ingredients` | TEXT | JSON array of ingredient strings (plain text, one per entry). Legacy rows may hold a bare comma-joined string — renderers fall back to splitting. |
-| `full_recipe` | TEXT DEFAULT '' | JSON array of method-step strings (plain text, one per entry). Legacy rows may hold a `"Ingredients:\n…\nMethod:\n1. …"` blob. |
+| `ingredients` | TEXT | JSON array of ingredient strings (plain text, one per entry). |
+| `full_recipe` | TEXT DEFAULT '' | JSON array of method-step strings (plain text, one per entry). |
 | `kid_rating` | INTEGER (1-5) | Child rating |
 | `human_feedback` | TEXT | Additional feedback |
-| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When the slot was last (re)planned — refreshed on every `add_weekly_menu_item` upsert (both INSERT and ON CONFLICT UPDATE). A startup migration adds it (nullable) and backfills existing rows once, since SQLite forbids `ADD COLUMN … DEFAULT CURRENT_TIMESTAMP`. |
+| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When the slot was last (re)planned — refreshed on every `add_weekly_menu_item` upsert (both INSERT and ON CONFLICT UPDATE). |
 
-One row per `(day_of_week, meal_type)`, enforced by a `UNIQUE` index (`idx_weekly_menu_day_meal`). `add_weekly_menu_item(… ingredients: list[str], full_recipe: list[str] = [])` is a true atomic upsert (`INSERT … ON CONFLICT(day_of_week, meal_type) DO UPDATE`); day/meal are normalized (`.strip().lower()`) and validated against a fixed vocabulary (`VALID_DAYS`, `VALID_MEAL_TYPES`), and both list args are trimmed and capped (`_MENU_LINES_LIMIT`, 40) then stored as JSON. The table holds at most 7 × 4 = 28 rows and two `weekly_menu` runs racing can't double-insert. A startup migration lowercases legacy rows, deletes any pre-existing duplicates (keeping the highest `id` per slot), then creates the unique index; the seed uses `INSERT OR IGNORE` so a re-seed after the agent overwrote rows leaves them alone. The weekly plan is built slot-by-slot with `add_weekly_menu_item` and then checked with `validate_weekly_menu_policy` (no args, validates the saved table). `add_weekly_menu_plan` and its `POST /api/weekly-menu/plan` route, plus the `POST /api/weekly-menu/validate` route, are **soft-deleted** (commented out — no caller); the `validate_weekly_menu_policy` MCP tool stays.
+One row per `(day_of_week, meal_type)`, enforced by a `UNIQUE` index (`idx_weekly_menu_day_meal`). `add_weekly_menu_item(… ingredients: list[str], full_recipe: list[str] = [])` is a true atomic upsert (`INSERT … ON CONFLICT(day_of_week, meal_type) DO UPDATE`); day/meal are normalized (`.strip().lower()`) and validated against a fixed vocabulary (`constants.DAY_SET`, `constants.MEAL_TYPE_SET`), and both list args are trimmed and capped (`validation.MENU_LINES_LIMIT`, 40) then stored as JSON. The table holds at most 7 × 4 = 28 rows and two `weekly_menu` runs racing can't double-insert. The weekly plan is built slot-by-slot with `add_weekly_menu_item` and then checked with `validate_weekly_menu_policy` (no args, validates the saved table).
 
 ### `detailed_prep_schedule`
 Defines food-preparation tasks for a human to execute.
@@ -66,7 +86,7 @@ Defines food-preparation tasks for a human to execute.
 | `status` | TEXT DEFAULT 'proposed' | `proposed` \| `acknowledged` \| `completed` \| `cancelled` |
 | `acknowledgement_key` | TEXT | Idempotency key set when ingredients were deducted (`prep-<id>-complete`) |
 
-`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). Each `quantity` is converted into the matched row's stored unit before it's deducted (`units.convert` — see **Units of measure**); a line whose unit can't be reconciled with the row's is skipped and listed in the response's `conversion_warnings`. The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
+`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). Each `quantity` is converted into the matched row's stored unit before it's deducted (`kitchendb.units.convert` — see **Units of measure**); a line whose unit can't be reconciled with the row's is skipped and listed in the response's `conversion_warnings`. The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
 
 ### `inventory_transactions`
 Immutable ledger of every inventory quantity change made through acknowledgement flows.
@@ -77,7 +97,7 @@ Immutable ledger of every inventory quantity change made through acknowledgement
 | `inventory_id` | INTEGER REFERENCES inventory(id) | Affected ingredient |
 | `quantity_change` | REAL (<> 0) | Signed change applied |
 | `quantity_before` | REAL | Quantity before the change |
-| `quantity_after` | REAL | Quantity after the change (may be negative - the `>= 0` CHECK was dropped alongside `inventory.quantity`'s) |
+| `quantity_after` | REAL | Quantity after the change (may be negative - there is no `>= 0` CHECK, matching `inventory.quantity`) |
 | `reason` | TEXT | Why the change happened |
 | `source_type` | TEXT | `prep_schedule` \| `shopping_item` |
 | `source_id` | INTEGER | Id of the source record |
@@ -85,6 +105,8 @@ Immutable ledger of every inventory quantity change made through acknowledgement
 | `created_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When recorded |
 
 `GET /api/dashboard` derives a `consumption` array from this ledger: for every negative `quantity_change` in the last 7 days it returns `{inventory_id, item_name, unit, quantity_consumed, transaction_count, last_consumed_at}` per ingredient, ordered by `quantity_consumed` descending. (Only acknowledged prep deductions land here today, so it reads as "ingredients used by prep this week".)
+
+`GET /api/dashboard` also returns a `constants` block — `{days, meal_types, day_order, meal_type_order}` from `constants.py` — so non-Python clients (chatui) don't hard-code the weekday/meal vocabulary.
 
 ### `shopping_items`
 There is no separate "list" entity — this table IS the one pending shopping list. Every
@@ -141,7 +163,7 @@ A single household profile row (`id` is pinned to `1`), seeded with `name = 'Ale
 | `notify_on_task_creation` | INTEGER DEFAULT 1 | Global email switch: `1` = the `send_*_email` tools deliver, `0` = they all return `{"sent": false}` |
 | `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last write |
 
-`GET /api/profile` returns the row; `PUT /api/profile` patches only the fields supplied (`name`, `email`, `cc_emails`, `notes`, `notify_on_task_creation`; a non-`@` `email` is rejected 400). The row is also embedded in `GET /api/dashboard` as `profile`. A startup migration drops the old `phone` column and backfills `cc_emails` / `favorite_recipes` (rebuilding the one-row table once, guarded on `phone` still being present).
+`GET /api/profile` returns the row; `PUT /api/profile` patches only the fields supplied (`name`, `email`, `cc_emails`, `notes`, `notify_on_task_creation`; a non-`@` `email` is rejected 400). The row is also embedded in `GET /api/dashboard` as `profile`.
 
 `favorite_recipes` is rewritten inside `capture_weekly_menu_rating` (`POST /api/weekly-menu/{id}/rating`): a 4- or 5-star rating moves that dish to the front (newest first, deduped case-insensitively), any lower rating removes it, and the list is trimmed to 10 — so an older favourite falls off once ten fresher dishes have been top-rated. The `get_household_preferences` MCP tool returns `{chef_note, favorite_recipes, has_preferences, guidance}` for agents (the Executive Chef consults it before planning a week); `has_preferences` is `false` and `guidance` says "optional context, not a blocker" when both the note and the favourites list are empty, so a fresh install doesn't stall the weekly-menu job.
 
@@ -173,13 +195,13 @@ inventory-affecting flows.
 
 ## Units of measure
 
-`dbmcp/units.py` is the single place inventory math reconciles units. Every inventory
-row is stored in one of five canonical units — `g`, `kg` (base gram), `ml`, `l` (base
-millilitre), `pcs` (base piece) — and `add_inventory` enforces that (aliases such as
-`grams`, `kilograms`, `litre`, `pieces` are accepted and stored in the short form;
-anything else is a 400). A one-time startup migration canonicalizes legacy
-`inventory.unit` / `shopping_items.unit` spellings and rewrites the old `bags` seed unit
-to `pcs`. Existing balances are **not** recomputed — the fix is forward-only.
+`dbmcp/kitchendb/units.py` is the single place inventory math reconciles units. Every
+inventory row is stored in one of five canonical units — `g`, `kg` (base gram), `ml`,
+`l` (base millilitre), `pcs` (base piece) — and `add_inventory` enforces that (aliases
+such as `grams`, `kilograms`, `litre`, `pieces` are accepted and stored in the short
+form; anything else is a 400). The seed data (`kitchendb/seed.py`) uses only canonical
+units; there is no migration of older layouts (a database starts empty or already on
+this schema).
 
 `convert(quantity, from_unit, to_unit) -> (value, note, ok)`:
 
