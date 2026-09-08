@@ -17,6 +17,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, Field, field_validator
 
+from units import CANONICAL_UNITS, canonicalize_inventory_unit, convert
+
 # Email notifications now live in agents/app/email/ (the agent is the only
 # process that sends mail). dbmcp owns data only - it has no SMTP config and no
 # send_*_email tools/routes any more.
@@ -102,7 +104,7 @@ def initialize_database() -> None:
             connection.executemany(
                 "INSERT INTO inventory (item_name, category, quantity, unit, minimum_threshold) VALUES (?, ?, ?, ?, ?)",
                 [
-                    ("Baby spinach", "Fresh", 2, "bags", 1),
+                    ("Baby spinach", "Fresh", 2, "pcs", 1),
                     ("Paneer", "Dairy", 450, "g", 250),
                     ("Brown rice", "Pantry", 1.8, "kg", 1),
                     ("Cherry tomatoes", "Fresh", 350, "g", 200),
@@ -202,7 +204,7 @@ def initialize_database() -> None:
                 [
                     ("monday", "07:30", "Morning prep",
                      json.dumps(["Wash the spinach and pat it dry.", "Portion the Greek yogurt into the day's serving bowls."]),
-                     _ingredients_used(("Baby spinach", 1, "bags"), ("Greek yogurt", 200, "g"))),
+                     _ingredients_used(("Baby spinach", 1, "pcs"), ("Greek yogurt", 200, "g"))),
                     ("tuesday", "17:00", "Dinner prep",
                      json.dumps(["Dice the cherry tomatoes.", "Press the paneer to remove excess water, then cube it."]),
                      _ingredients_used(("Cherry tomatoes", 150, "g"), ("Paneer", 200, "g"))),
@@ -379,6 +381,23 @@ def initialize_database() -> None:
                 DROP TABLE _transactions_migrate;
             """)
 
+        # Unit-of-measure normalization: every inventory deduction/intake now
+        # converts the incoming quantity into the row's *stored* unit before
+        # touching the balance (see units.py). Canonicalize legacy alias
+        # spellings in the two tables that feed that math so a row saved as
+        # "kilograms"/"litre"/"pieces" lines up with the "kg"/"l"/"pcs" the
+        # converter expects, and fold the old "bags" pack-unit onto "pcs".
+        # Balances themselves are left untouched (fix-forward only).
+        for _unit_table in ("inventory", "shopping_items"):
+            for _row in connection.execute(f"SELECT id, unit FROM {_unit_table}").fetchall():
+                _canon = canonicalize_inventory_unit(_row["unit"])
+                if _canon is None and str(_row["unit"]).strip().lower().rstrip("s") == "bag":
+                    _canon = "pcs"
+                if _canon and _canon != _row["unit"]:
+                    connection.execute(
+                        f"UPDATE {_unit_table} SET unit = ? WHERE id = ?", (_canon, _row["id"])
+                    )
+
 
 def _record(table: str, record_id: int) -> dict[str, Any]:
     with _connect() as connection:
@@ -483,14 +502,23 @@ def validate_weekly_menu_policy(menu_items: list[dict[str, Any]] | None = None) 
 
 @mcp.tool()
 def add_inventory(item_name: str, quantity: float, unit: str, category: str = "Pantry", minimum_threshold: float = 0) -> dict[str, Any]:
-    """Add a new ingredient to inventory."""
+    """Add a new ingredient to inventory.
+
+    `unit` is the row's canonical stock unit and must be one of g, kg, ml, l, pcs
+    (common aliases like "grams"/"litre"/"pieces" are accepted and stored in the
+    canonical short form). Every later deduction/intake converts its own quantity
+    into this unit, so pick the one you want the running balance reported in.
+    """
     if not item_name.strip() or not unit.strip():
         raise ValueError("item_name and unit are required")
     if quantity < 0 or minimum_threshold < 0:
         raise ValueError("quantity and minimum_threshold cannot be negative")
+    canonical_unit = canonicalize_inventory_unit(unit)
+    if canonical_unit is None:
+        raise ValueError(f"unit must be one of {', '.join(CANONICAL_UNITS)} (or a recognized alias); got '{unit.strip()}'")
     with _connect() as connection:
         try:
-            cursor = connection.execute("INSERT INTO inventory (item_name, category, quantity, unit, minimum_threshold) VALUES (?, ?, ?, ?, ?)", (item_name.strip(), category.strip(), quantity, unit.strip(), minimum_threshold))
+            cursor = connection.execute("INSERT INTO inventory (item_name, category, quantity, unit, minimum_threshold) VALUES (?, ?, ?, ?, ?)", (item_name.strip(), category.strip(), quantity, canonical_unit, minimum_threshold))
         except sqlite3.IntegrityError as error:
             raise ValueError(f"Inventory item already exists: {item_name}") from error
     return _record("inventory", cursor.lastrowid)
@@ -674,7 +702,11 @@ def _normalize_ingredients_used(ingredients_used: list[dict[str, Any]] | None) -
             raise ValueError("each ingredients_used entry requires a non-empty item_name")
         if quantity <= 0:
             raise ValueError("ingredients_used quantities must be greater than zero")
-        normalized.append({"item_name": name, "quantity": quantity, "unit": str(item.get("unit", "")).strip()})
+        raw_unit = str(item.get("unit", "")).strip()
+        # Tidy a recognized mass/volume/count alias to its canonical short form;
+        # leave culinary units (tbsp, cup, ...) and anything unrecognized as
+        # given - convert() at deduction time approximates or skips them.
+        normalized.append({"item_name": name, "quantity": quantity, "unit": canonicalize_inventory_unit(raw_unit) or raw_unit})
     return normalized
 
 
@@ -701,7 +733,7 @@ def add_detailed_prep_schedule(
         full_recipe).
       ingredients_used: every ingredient this task will consume, as a JSON array of
         {item_name, quantity, unit} objects, e.g.
-        [{"item_name": "Baby spinach", "quantity": 1, "unit": "bags"},
+        [{"item_name": "Baby spinach", "quantity": 1, "unit": "pcs"},
          {"item_name": "Greek yogurt", "quantity": 200, "unit": "g"}]
         item_name must match (case-insensitively) an item_name already in inventory -
         copy the exact spelling from get_inventory. The moment a human checks this task
@@ -710,6 +742,14 @@ def add_detailed_prep_schedule(
         inventory_transactions row; an item_name with no matching inventory row is
         skipped rather than failing. Leaving this empty (or omitting an ingredient the
         task genuinely uses) means checking the task off will never touch that stock.
+        unit: use grams/kilograms (g, kg), millilitres/litres (ml, l) or pieces
+        (pcs). Recipe units - tsp, tbsp, cup - are accepted and approximated to
+        g/ml on deduction (1 tsp=5, 1 tbsp=15, 1 cup=240). The quantity is
+        converted into the inventory row's own unit before it's deducted, so
+        "500 g" against a row tracked in kg deducts 0.5. A unit that can't be
+        reconciled with the row's unit (e.g. "2 bags" against a kg row) is
+        reported back and left un-deducted rather than applied wrongly - so pick
+        a unit in the same dimension (mass/volume/count) as the inventory row.
     """
     instructions = _clean_menu_lines(detailed_instructions, field="detailed_instructions", required=True)
     ingredients = _normalize_ingredients_used(ingredients_used)
@@ -774,22 +814,38 @@ def capture_prep_completion_status(prep_schedule_id: int, is_completed: bool, hu
         # deducted and allowed to go negative, so the shortfall stays visible until a
         # shopping run tops it back up; an item_name with no matching inventory row is
         # simply skipped rather than failing the acknowledgement.
+        # Each entry's quantity is converted into the matched row's stored unit
+        # first (units.convert): "500 g" against a "kg" row deducts 0.5. A line
+        # whose unit can't be reconciled with the row's (different dimension, or
+        # an unrecognized unit) is skipped and reported in conversion_warnings
+        # rather than applied as a wrong number.
+        conversion_warnings: list[str] = []
         for index, entry in enumerate(ingredients):
             inventory = connection.execute("SELECT * FROM inventory WHERE item_name = ?", (entry["item_name"],)).fetchone()
             if inventory is None:
                 continue
+            amount, note, ok = convert(entry["quantity"], entry.get("unit"), inventory["unit"])
+            if not ok or amount <= 0:
+                conversion_warnings.append(
+                    f"{entry['item_name']}: {note or 'quantity resolves to zero'}; not deducted"
+                )
+                continue
             before = inventory["quantity"]
-            after = before - entry["quantity"]
+            after = round(before - amount, 4)
+            reason = "Prep acknowledged" + (f" ({note})" if note else "")
             connection.execute("UPDATE inventory SET quantity = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (after, inventory["id"]))
             connection.execute(
                 "INSERT INTO inventory_transactions (inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (inventory["id"], -entry["quantity"], before, after, "Prep acknowledged", "prep_schedule", prep_schedule_id, f"{acknowledgement_key}:{index}"),
+                (inventory["id"], -amount, before, after, reason, "prep_schedule", prep_schedule_id, f"{acknowledgement_key}:{index}"),
             )
         connection.execute(
             "UPDATE detailed_prep_schedule SET is_completed = 1, status = 'acknowledged', acknowledgement_key = ?, human_notes = ? WHERE id = ?",
             (acknowledgement_key, human_notes, prep_schedule_id),
         )
-        return _record_in_connection(connection, "detailed_prep_schedule", prep_schedule_id)
+        result = _record_in_connection(connection, "detailed_prep_schedule", prep_schedule_id)
+        if conversion_warnings:
+            result["conversion_warnings"] = conversion_warnings
+        return result
 
 
 def cancel_prep_schedule(prep_schedule_id: int, human_notes: str = "") -> dict[str, Any]:
@@ -842,6 +898,7 @@ def add_shopping_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 raise ValueError("each shopping item requires item_name, proposed_quantity, and unit") from error
             if not name or quantity <= 0 or not unit:
                 raise ValueError("shopping item names, quantities, and units must be valid")
+            unit = canonicalize_inventory_unit(unit) or unit  # tidy "grams"->"g" etc; leave the rest
             connection.execute(
                 """
                 INSERT INTO shopping_items (item_name, proposed_quantity, unit) VALUES (?, ?, ?)
@@ -871,10 +928,13 @@ def edit_shopping_item(shopping_item_id: int, proposed_quantity: float | None = 
         row = connection.execute("SELECT * FROM shopping_items WHERE id = ?", (shopping_item_id,)).fetchone()
         if row is None:
             raise ValueError(f"No shopping item found for id {shopping_item_id}")
+        new_unit = row["unit"]
+        if unit:
+            new_unit = canonicalize_inventory_unit(unit) or unit.strip()
         connection.execute(
             "UPDATE shopping_items SET proposed_quantity = ?, unit = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (proposed_quantity if proposed_quantity is not None else row["proposed_quantity"],
-             unit.strip() if unit else row["unit"], shopping_item_id),
+             new_unit, shopping_item_id),
         )
     return _record("shopping_items", shopping_item_id)
 
@@ -905,13 +965,17 @@ def acknowledge_shopping_items(acknowledgement_key: str, purchased_items: list[d
     """Move purchased quantities into inventory and clear those items off the pending
     shopping list, each exactly once.
 
-    purchased_items is [{shopping_item_id, actual_quantity}]. Inventory is matched (and
-    created if it doesn't exist yet) by the shopping item's item_name - never by
-    inventory_id, since that's an internal id the caller shouldn't need to track. Once
-    applied, the shopping_items row is deleted (this is what "clears" it off the list);
-    a replay with the same acknowledgement_key (e.g. a retried request) is a safe no-op
-    that will not double-add stock, even though by then the row it originally matched is
-    already gone.
+    purchased_items is [{shopping_item_id, actual_quantity}]. actual_quantity is read
+    in the shopping item's own unit and converted into the matched inventory row's
+    stored unit before it's added (buying "2 kg" of a row tracked in "g" adds 2000).
+    Inventory is matched (and created if it doesn't exist yet) by the shopping item's
+    item_name - never by inventory_id, since that's an internal id the caller shouldn't
+    need to track. Once applied, the shopping_items row is deleted (this is what
+    "clears" it off the list); a replay with the same acknowledgement_key (e.g. a
+    retried request) is a safe no-op that will not double-add stock, even though by
+    then the row it originally matched is already gone. An item whose unit can't be
+    reconciled with the existing inventory row's unit is left on the list and reported
+    in "warnings" instead of being added with a wrong number.
     """
     if not acknowledgement_key.strip() or not purchased_items:
         raise ValueError("acknowledgement_key and purchased_items are required")
@@ -929,6 +993,7 @@ def acknowledge_shopping_items(acknowledgement_key: str, purchased_items: list[d
     with _connect() as connection:
         applied_ids: list[int] = []
         already_applied_ids: list[int] = []
+        warnings: list[str] = []
         for item_id, quantity in normalized_purchases:
             idempotency_key = f"{acknowledgement_key}:{item_id}"
             if connection.execute("SELECT 1 FROM inventory_transactions WHERE idempotency_key = ?", (idempotency_key,)).fetchone():
@@ -942,19 +1007,32 @@ def acknowledge_shopping_items(acknowledgement_key: str, purchased_items: list[d
             if quantity > 0:
                 inventory = connection.execute("SELECT * FROM inventory WHERE item_name = ?", (row["item_name"],)).fetchone()
                 if inventory is None:
-                    cursor = connection.execute("INSERT INTO inventory (item_name, category, quantity, unit) VALUES (?, 'Pantry', ?, ?)", (row["item_name"], quantity, row["unit"]))
-                    inventory_id, before = cursor.lastrowid, 0
+                    # New row: store it in the canonical form of the shopping
+                    # unit when we recognize one, else take the unit as typed.
+                    new_unit = canonicalize_inventory_unit(row["unit"]) or row["unit"]
+                    cursor = connection.execute("INSERT INTO inventory (item_name, category, quantity, unit) VALUES (?, 'Pantry', ?, ?)", (row["item_name"], quantity, new_unit))
+                    inventory_id, before, added, note = cursor.lastrowid, 0, quantity, ""
                 else:
+                    added, note, ok = convert(quantity, row["unit"], inventory["unit"])
+                    if not ok or added <= 0:
+                        warnings.append(
+                            f"{row['item_name']}: {note or 'quantity resolves to zero'}; left on the shopping list"
+                        )
+                        continue
                     inventory_id, before = inventory["id"], inventory["quantity"]
-                    connection.execute("UPDATE inventory SET quantity = quantity + ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (quantity, inventory_id))
+                    connection.execute("UPDATE inventory SET quantity = quantity + ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (added, inventory_id))
+                reason = "Shopping purchase acknowledged" + (f" ({note})" if note else "")
                 connection.execute(
                     "INSERT INTO inventory_transactions (inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (inventory_id, quantity, before, before + quantity, "Shopping purchase acknowledged", "shopping_item", item_id, idempotency_key),
+                    (inventory_id, added, before, round(before + added, 4), reason, "shopping_item", item_id, idempotency_key),
                 )
             connection.execute("DELETE FROM shopping_items WHERE id = ?", (item_id,))
             applied_ids.append(item_id)
         replayed = not applied_ids and bool(already_applied_ids)
-        return {"replayed": replayed, "cleared_item_ids": applied_ids}
+        result: dict[str, Any] = {"replayed": replayed, "cleared_item_ids": applied_ids}
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
 
 def get_user_profile() -> dict[str, Any]:

@@ -386,6 +386,91 @@ def test_dashboard_caps_completed_tasks_at_ten(client):
     assert {json.loads(row["detailed_instructions"])[0] for row in completed} == {f"job {index}" for index in range(2, 12)}
 
 
+def test_prep_deduction_converts_into_the_stored_unit(client):
+    # Row tracked in kg; task consumes 500 g -> deduct 0.5, not 500.
+    inventory = client.post("/api/inventory", json={"item_name": "Biryani rice", "quantity": 2, "unit": "kg"}).json()
+    task = client.post(
+        "/api/prep-schedule",
+        json={
+            "trigger_day": "monday",
+            "trigger_time": "08:00",
+            "task_type": "Batch prep",
+            "detailed_instructions": ["Cook rice"],
+            "ingredients_used": [{"item_name": "Biryani rice", "quantity": 500, "unit": "g"}],
+        },
+    ).json()
+
+    completed = client.patch(f"/api/prep-schedule/{task['id']}/completion", json={"is_completed": True}).json()
+    assert "conversion_warnings" not in completed
+
+    dashboard = client.get("/api/dashboard").json()
+    assert next(item for item in dashboard["inventory"] if item["id"] == inventory["id"])["quantity"] == 1.5
+
+
+def test_prep_deduction_skips_unconvertible_unit_and_warns(client):
+    inventory = client.post("/api/inventory", json={"item_name": "Jasmine rice", "quantity": 3, "unit": "kg"}).json()
+    task = client.post(
+        "/api/prep-schedule",
+        json={
+            "trigger_day": "monday",
+            "trigger_time": "08:00",
+            "task_type": "Batch prep",
+            "detailed_instructions": ["Cook rice"],
+            "ingredients_used": [{"item_name": "Jasmine rice", "quantity": 2, "unit": "bags"}],
+        },
+    ).json()
+
+    completed = client.patch(f"/api/prep-schedule/{task['id']}/completion", json={"is_completed": True}).json()
+    assert completed["status"] == "acknowledged"
+    assert any("Jasmine rice" in warning for warning in completed["conversion_warnings"])
+
+    dashboard = client.get("/api/dashboard").json()
+    # Balance untouched - the bad line was skipped, not applied as "-2 kg".
+    assert next(item for item in dashboard["inventory"] if item["id"] == inventory["id"])["quantity"] == 3
+
+
+def test_shopping_acknowledge_converts_into_the_stored_unit(client):
+    inventory = client.post("/api/inventory", json={"item_name": "Butter", "quantity": 100, "unit": "g"}).json()
+    item = client.post(
+        "/api/shopping-items", json={"items": [{"item_name": "Butter", "proposed_quantity": 2, "unit": "kg"}]}
+    ).json()[0]
+
+    ack = client.post(
+        "/api/shopping-items/acknowledge",
+        json={"acknowledgement_key": "run-1", "purchased_items": [{"shopping_item_id": item["id"], "actual_quantity": 2}]},
+    ).json()
+    assert ack["cleared_item_ids"] == [item["id"]]
+
+    dashboard = client.get("/api/dashboard").json()
+    assert next(row for row in dashboard["inventory"] if row["id"] == inventory["id"])["quantity"] == 2100
+
+
+def test_shopping_acknowledge_leaves_unconvertible_item_on_the_list(client):
+    inventory = client.post("/api/inventory", json={"item_name": "Olive oil", "quantity": 500, "unit": "ml"}).json()
+    item = client.post(
+        "/api/shopping-items", json={"items": [{"item_name": "Olive oil", "proposed_quantity": 1, "unit": "kg"}]}
+    ).json()[0]
+
+    ack = client.post(
+        "/api/shopping-items/acknowledge",
+        json={"acknowledgement_key": "run-1", "purchased_items": [{"shopping_item_id": item["id"], "actual_quantity": 1}]},
+    ).json()
+    assert ack["cleared_item_ids"] == []
+    assert any("Olive oil" in warning for warning in ack["warnings"])
+
+    dashboard = client.get("/api/dashboard").json()
+    assert next(row for row in dashboard["inventory"] if row["id"] == inventory["id"])["quantity"] == 500
+    assert any(row["id"] == item["id"] for row in dashboard["shopping_items"])  # still pending
+
+
+def test_add_inventory_rejects_non_canonical_unit_and_normalizes_aliases(client):
+    rejected = client.post("/api/inventory", json={"item_name": "Coriander", "quantity": 2, "unit": "bunch"})
+    assert rejected.status_code == 400
+
+    normalized = client.post("/api/inventory", json={"item_name": "Flour", "quantity": 1, "unit": "kilograms"}).json()
+    assert normalized["unit"] == "kg"
+
+
 def test_chat_session_roundtrip(client):
     empty = client.get("/api/chat-sessions/unknown-session").json()
     assert empty == {"messages": []}

@@ -14,8 +14,8 @@ Tracks available ingredients and stock thresholds.
 | `id` | INTEGER PRIMARY KEY | Ingredient identifier |
 | `item_name` | TEXT UNIQUE (case-insensitive) | Ingredient name |
 | `category` | TEXT | Ingredient category |
-| `quantity` | REAL | Quantity currently available. **May be negative** - prep acknowledgements deduct what a recipe used even when tracked stock was already at/near zero, so a shortfall stays visible until a shopping run tops it back up. |
-| `unit` | TEXT | Unit of measurement |
+| `quantity` | REAL | Quantity currently available, **in `unit`**. **May be negative** - prep acknowledgements deduct what a recipe used even when tracked stock was already at/near zero, so a shortfall stays visible until a shopping run tops it back up. |
+| `unit` | TEXT | Canonical stock unit — one of `g`, `kg`, `ml`, `l`, `pcs`. `add_inventory` rejects anything else (accepting aliases like `grams`/`litre`/`pieces` and storing the short form); a startup migration canonicalizes legacy alias spellings and folds the old `bags` seed unit onto `pcs`. Every deduction/intake converts its own quantity into this unit before touching `quantity` (see **Units of measure** below). |
 | `minimum_threshold` | REAL (>= 0) | Reorder threshold |
 | `last_updated` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last stock update |
 
@@ -60,13 +60,13 @@ Defines food-preparation tasks for a human to execute.
 | `trigger_time` | TEXT | Time at which the task runs |
 | `task_type` | TEXT | Task category |
 | `detailed_instructions` | TEXT | JSON array of plain-text instruction step strings, e.g. `["Dice the onions.", "Heat oil..."]` (same convention as `weekly_menu.full_recipe`) |
-| `ingredients_used` | TEXT DEFAULT '[]' | JSON array of `{item_name, quantity, unit}` objects - everything this task will consume, keyed by `inventory.item_name` (case-insensitive), set at creation and deducted when the task is checked complete |
+| `ingredients_used` | TEXT DEFAULT '[]' | JSON array of `{item_name, quantity, unit}` objects - everything this task will consume, keyed by `inventory.item_name` (case-insensitive), set at creation and deducted when the task is checked complete. `unit` may be g/kg/ml/l/pcs or a culinary unit (tsp/tbsp/cup, approximated to g/ml on deduction); each `quantity` is converted into the matched row's stored unit first. A line whose unit can't be reconciled with the row's (different dimension, or unrecognized) is skipped and surfaced in the completion response's `conversion_warnings`, not applied. |
 | `is_completed` | BOOLEAN DEFAULT 0 | Completion status |
 | `human_notes` | TEXT | Notes about the task |
 | `status` | TEXT DEFAULT 'proposed' | `proposed` \| `acknowledged` \| `completed` \| `cancelled` |
 | `acknowledgement_key` | TEXT | Idempotency key set when ingredients were deducted (`prep-<id>-complete`) |
 
-`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
+`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). Each `quantity` is converted into the matched row's stored unit before it's deducted (`units.convert` — see **Units of measure**); a line whose unit can't be reconciled with the row's is skipped and listed in the response's `conversion_warnings`. The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
 
 ### `inventory_transactions`
 Immutable ledger of every inventory quantity change made through acknowledgement flows.
@@ -95,8 +95,8 @@ flipping a status.
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY | Item identifier |
 | `item_name` | TEXT UNIQUE COLLATE NOCASE | Ingredient name - unique case-insensitively, which is what makes `add_shopping_items` a true upsert |
-| `proposed_quantity` | REAL (> 0) | Quantity proposed |
-| `unit` | TEXT | Unit of measurement |
+| `proposed_quantity` | REAL (> 0) | Quantity proposed, in `unit` |
+| `unit` | TEXT | Unit of measurement. `add_shopping_items`/`edit_shopping_item` tidy a recognized alias to its canonical `g`/`kg`/`ml`/`l`/`pcs` form but stay permissive on anything else (this list is a human scratchpad); the reconciliation that matters happens at acknowledge time. |
 | `created_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When first proposed |
 | `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last time the quantity/unit changed |
 
@@ -170,3 +170,32 @@ key against on replay — instead, each deduction's `inventory_transactions.idem
 match is treated as an already-applied replay. Either way, a replay returns
 `{"replayed": true}` instead of double-applying. Preserve this pattern when adding new
 inventory-affecting flows.
+
+## Units of measure
+
+`dbmcp/units.py` is the single place inventory math reconciles units. Every inventory
+row is stored in one of five canonical units — `g`, `kg` (base gram), `ml`, `l` (base
+millilitre), `pcs` (base piece) — and `add_inventory` enforces that (aliases such as
+`grams`, `kilograms`, `litre`, `pieces` are accepted and stored in the short form;
+anything else is a 400). A one-time startup migration canonicalizes legacy
+`inventory.unit` / `shopping_items.unit` spellings and rewrites the old `bags` seed unit
+to `pcs`. Existing balances are **not** recomputed — the fix is forward-only.
+
+`convert(quantity, from_unit, to_unit) -> (value, note, ok)`:
+
+- blank `from_unit`, or `from_unit == to_unit` → passthrough (`ok=True`, `note=""`).
+- same dimension → `quantity * from_base / to_base`, rounded to 4 dp (`500 g` into a `kg`
+  row → `0.5`; `2 kg` into a `g` row → `2000`). `note` reads `converted 500 g -> 0.5 kg`
+  and is appended to the `inventory_transactions.reason`.
+- culinary units `tsp`/`tbsp`/`cup`/`pinch`/`dash`/`handful` (plus `oz`/`lb`/`fl oz`/
+  `pint`/`quart`/`gallon`) are approximated to a gram-or-millilitre magnitude
+  (`tsp`=5, `tbsp`=15, `cup`=240, assuming density ≈ water) and adopt the target row's
+  dimension.
+- different dimensions, or an unrecognized unit on either side → `ok=False`; the caller
+  (`capture_prep_completion_status`, `acknowledge_shopping_items`) **skips that line**,
+  leaves the balance / shopping row untouched, and returns the reason in
+  `conversion_warnings` (prep) or `warnings` (shopping). Acknowledging still succeeds
+  overall.
+
+`adjust_inventory_quantity` and `remove_or_discard_inventory` are manual corrections that
+operate directly in the row's own unit and do no conversion.
