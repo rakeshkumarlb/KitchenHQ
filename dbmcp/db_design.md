@@ -14,10 +14,12 @@ Tracks available ingredients and stock thresholds.
 | `id` | INTEGER PRIMARY KEY | Ingredient identifier |
 | `item_name` | TEXT UNIQUE (case-insensitive) | Ingredient name |
 | `category` | TEXT | Ingredient category |
-| `quantity` | REAL (>= 0) | Quantity currently available |
+| `quantity` | REAL | Quantity currently available. **May be negative** - prep acknowledgements deduct what a recipe used even when tracked stock was already at/near zero, so a shortfall stays visible until a shopping run tops it back up. |
 | `unit` | TEXT | Unit of measurement |
 | `minimum_threshold` | REAL (>= 0) | Reorder threshold |
 | `last_updated` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last stock update |
+
+`init_db.py` rebuilds this table once on startup for databases created before the `quantity >= 0` CHECK was dropped (guarded on the old constraint text still being present).
 
 ### `wastage_log`
 Records discarded ingredients.
@@ -36,16 +38,17 @@ Stores planned meals for each day of the week.
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY | Menu item identifier |
 | `day_of_week` | TEXT | Planned day (full lowercase weekday name) |
-| `meal_type` | TEXT | Meal category, such as breakfast or dinner |
+| `meal_type` | TEXT | Meal category — exactly one of `breakfast`, `lunch`, `snack`, `dinner` |
 | `dish_name` | TEXT | Dish name |
 | `is_kid_friendly` | BOOLEAN | Whether the dish is kid-friendly |
 | `macros` | TEXT | Macronutrient information |
-| `ingredients` | TEXT | Ingredients for the dish |
-| `full_recipe` | TEXT DEFAULT '' | Full recipe text |
+| `ingredients` | TEXT | JSON array of ingredient strings (plain text, one per entry). Legacy rows may hold a bare comma-joined string — renderers fall back to splitting. |
+| `full_recipe` | TEXT DEFAULT '' | JSON array of method-step strings (plain text, one per entry). Legacy rows may hold a `"Ingredients:\n…\nMethod:\n1. …"` blob. |
 | `kid_rating` | INTEGER (1-5) | Child rating |
 | `human_feedback` | TEXT | Additional feedback |
+| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When the slot was last (re)planned — refreshed on every `add_weekly_menu_item` upsert (both INSERT and ON CONFLICT UPDATE). A startup migration adds it (nullable) and backfills existing rows once, since SQLite forbids `ADD COLUMN … DEFAULT CURRENT_TIMESTAMP`. |
 
-One row per `(day_of_week, meal_type)`; `add_weekly_menu_item` upserts on that pair.
+One row per `(day_of_week, meal_type)`, enforced by a `UNIQUE` index (`idx_weekly_menu_day_meal`). `add_weekly_menu_item(… ingredients: list[str], full_recipe: list[str] = [])` is a true atomic upsert (`INSERT … ON CONFLICT(day_of_week, meal_type) DO UPDATE`); day/meal are normalized (`.strip().lower()`) and validated against a fixed vocabulary (`VALID_DAYS`, `VALID_MEAL_TYPES`), and both list args are trimmed and capped (`_MENU_LINES_LIMIT`, 40) then stored as JSON. The table holds at most 7 × 4 = 28 rows and two `weekly_menu` runs racing can't double-insert. A startup migration lowercases legacy rows, deletes any pre-existing duplicates (keeping the highest `id` per slot), then creates the unique index; the seed uses `INSERT OR IGNORE` so a re-seed after the agent overwrote rows leaves them alone. The weekly plan is built slot-by-slot with `add_weekly_menu_item` and then checked with `validate_weekly_menu_policy` (no args, validates the saved table). `add_weekly_menu_plan` and its `POST /api/weekly-menu/plan` route, plus the `POST /api/weekly-menu/validate` route, are **soft-deleted** (commented out — no caller); the `validate_weekly_menu_policy` MCP tool stays.
 
 ### `detailed_prep_schedule`
 Defines food-preparation tasks for a human to execute.
@@ -56,14 +59,14 @@ Defines food-preparation tasks for a human to execute.
 | `trigger_day` | TEXT | Day on which the task runs |
 | `trigger_time` | TEXT | Time at which the task runs |
 | `task_type` | TEXT | Task category |
-| `detailed_instructions` | TEXT | Preparation instructions |
+| `detailed_instructions` | TEXT | JSON array of plain-text instruction step strings, e.g. `["Dice the onions.", "Heat oil..."]` (same convention as `weekly_menu.full_recipe`) |
+| `ingredients_used` | TEXT DEFAULT '[]' | JSON array of `{item_name, quantity, unit}` objects - everything this task will consume, keyed by `inventory.item_name` (case-insensitive), set at creation and deducted when the task is checked complete |
 | `is_completed` | BOOLEAN DEFAULT 0 | Completion status |
 | `human_notes` | TEXT | Notes about the task |
-| `ingredients_used` | TEXT | Ingredients consumed (free text, set at creation) |
-| `ingredients_created` | TEXT | Ingredients produced (free text, set at creation) |
-| `status` | TEXT DEFAULT 'proposed' | `proposed` \| `acknowledged` \| `completed` |
-| `consumption_json` | TEXT DEFAULT '[]' | Explicit `{inventory_id, quantity, unit}` items deducted on acknowledgement |
-| `acknowledgement_key` | TEXT | Idempotency key from `acknowledge_prep_schedule` |
+| `status` | TEXT DEFAULT 'proposed' | `proposed` \| `acknowledged` \| `completed` \| `cancelled` |
+| `acknowledgement_key` | TEXT | Idempotency key set when ingredients were deducted (`prep-<id>-complete`) |
+
+`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
 
 ### `inventory_transactions`
 Immutable ledger of every inventory quantity change made through acknowledgement flows.
@@ -74,39 +77,33 @@ Immutable ledger of every inventory quantity change made through acknowledgement
 | `inventory_id` | INTEGER REFERENCES inventory(id) | Affected ingredient |
 | `quantity_change` | REAL (<> 0) | Signed change applied |
 | `quantity_before` | REAL | Quantity before the change |
-| `quantity_after` | REAL (>= 0) | Quantity after the change |
+| `quantity_after` | REAL | Quantity after the change (may be negative - the `>= 0` CHECK was dropped alongside `inventory.quantity`'s) |
 | `reason` | TEXT | Why the change happened |
-| `source_type` | TEXT | `prep_schedule` \| `shopping_list` |
+| `source_type` | TEXT | `prep_schedule` \| `shopping_item` |
 | `source_id` | INTEGER | Id of the source record |
 | `idempotency_key` | TEXT UNIQUE | `{acknowledgement_key}:{index}`, prevents double-applying a replayed acknowledgement |
 | `created_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When recorded |
 
-### `shopping_lists`
-A proposed (and later purchased) shopping run.
-
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PRIMARY KEY | List identifier |
-| `status` | TEXT DEFAULT 'proposed' | `proposed` \| `purchased` |
-| `generated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When proposed |
-| `acknowledged_at` | DATETIME | When purchases were acknowledged |
-| `acknowledgement_key` | TEXT UNIQUE | Idempotency key from `acknowledge_shopping_list` |
+`GET /api/dashboard` derives a `consumption` array from this ledger: for every negative `quantity_change` in the last 7 days it returns `{inventory_id, item_name, unit, quantity_consumed, transaction_count, last_consumed_at}` per ingredient, ordered by `quantity_consumed` descending. (Only acknowledged prep deductions land here today, so it reads as "ingredients used by prep this week".)
 
 ### `shopping_items`
-Line items belonging to a `shopping_lists` row.
+There is no separate "list" entity — this table IS the one pending shopping list. Every
+row is something still waiting to be bought; a purchase deletes its row rather than
+flipping a status.
 
 | Column | Type | Description |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY | Item identifier |
-| `shopping_list_id` | INTEGER REFERENCES shopping_lists(id) | Parent list |
-| `item_name` | TEXT | Ingredient name |
+| `item_name` | TEXT UNIQUE COLLATE NOCASE | Ingredient name - unique case-insensitively, which is what makes `add_shopping_items` a true upsert |
 | `proposed_quantity` | REAL (> 0) | Quantity proposed |
-| `actual_quantity` | REAL (>= 0) | Quantity actually purchased (set on acknowledgement) |
 | `unit` | TEXT | Unit of measurement |
-| `status` | TEXT DEFAULT 'proposed' | `proposed` \| `purchased` |
+| `created_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When first proposed |
+| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last time the quantity/unit changed |
+
+`add_shopping_items(items)` is an `INSERT … ON CONFLICT(item_name) DO UPDATE` upsert: an item with a name already pending has its `proposed_quantity` increased by the new amount (and `unit` overwritten) instead of creating a duplicate row, so a caller never has to check for an existing list before deciding whether to create or append — the ambiguity is resolved in this one method, not left to whoever calls it. `edit_shopping_item`/`delete_shopping_item` correct or drop one row; `clear_shopping_items` empties the whole table. None of these touch `inventory`.
 
 ### `agent_runs`
-Best-effort telemetry for scheduled agent jobs (`executivechef_agent/worker.py`).
+Best-effort telemetry for agent jobs, both scheduled and on-demand (`agents/app/jobs.py`, run by the `agent-api` service).
 
 | Column | Type | Description |
 |---|---|---|
@@ -128,6 +125,48 @@ Durable storage for the Executive Chef chat transcript per browser/session, so r
 | `messages_json` | TEXT DEFAULT '[]' | LangChain messages, serialized with `langchain_core.messages.messages_to_dict` |
 | `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last write |
 
+`GET /api/chat-sessions?limit=5` lists the most recently updated sessions (session_id, updated_at, and a preview built from the first human message) so `chatui` can offer "recent conversations" without loading full transcripts. Rows are never pruned by this endpoint — it only limits what's returned.
+
+### `user_profile`
+A single household profile row (`id` is pinned to `1`), seeded with `name = 'Alex Kim'` on first startup.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY CHECK (id = 1) | Always `1` |
+| `name` | TEXT DEFAULT '' | Household name, shown in the chatui header/greeting |
+| `email` | TEXT DEFAULT '' | Where prep-task alert emails are sent |
+| `cc_emails` | TEXT DEFAULT '' | Extra addresses (comma/semicolon/newline separated) cc'd on every task-alert email |
+| `notes` | TEXT DEFAULT '' | Free-text "note for the chef" — surfaced to the Executive Chef as weekly-menu planning context |
+| `favorite_recipes` | TEXT DEFAULT '[]' | JSON array (max 10, newest first) of `{dish_name, rating, rated_at}`, maintained automatically from weekly-menu ratings — not user-patchable |
+| `notify_on_task_creation` | INTEGER DEFAULT 1 | Global email switch: `1` = the `send_*_email` tools deliver, `0` = they all return `{"sent": false}` |
+| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last write |
+
+`GET /api/profile` returns the row; `PUT /api/profile` patches only the fields supplied (`name`, `email`, `cc_emails`, `notes`, `notify_on_task_creation`; a non-`@` `email` is rejected 400). The row is also embedded in `GET /api/dashboard` as `profile`. A startup migration drops the old `phone` column and backfills `cc_emails` / `favorite_recipes` (rebuilding the one-row table once, guarded on `phone` still being present).
+
+`favorite_recipes` is rewritten inside `capture_weekly_menu_rating` (`POST /api/weekly-menu/{id}/rating`): a 4- or 5-star rating moves that dish to the front (newest first, deduped case-insensitively), any lower rating removes it, and the list is trimmed to 10 — so an older favourite falls off once ten fresher dishes have been top-rated. The `get_household_preferences` MCP tool returns `{chef_note, favorite_recipes, has_preferences, guidance}` for agents (the Executive Chef consults it before planning a week); `has_preferences` is `false` and `guidance` says "optional context, not a blocker" when both the note and the favourites list are empty, so a fresh install doesn't stall the weekly-menu job.
+
+## Notifications
+
+Email notifications are **no longer part of dbmcp**. They moved to
+`agents/app/email/` (the agent is the only process that sends mail):
+the three `send_*_email` tools are built locally per agent run, SMTP config lives on
+the `agent-api` service, and the two bits of stored data an email needs (the recipient
+`user_profile` row, and the saved `weekly_menu` / `shopping_items` used to back-fill an
+omitted payload) are fetched over this service's REST API (`GET /api/profile`,
+`GET /api/dashboard`). dbmcp keeps no SMTP settings and has no `/api/notifications/*`
+routes. `user_profile.notify_on_task_creation` is still the household's global email
+on/off switch, read by the agent over `GET /api/profile`.
+
 ## Idempotency pattern
 
-`detailed_prep_schedule`/`inventory_transactions` and `shopping_lists`/`shopping_items` both follow propose-then-acknowledge: proposing never touches `inventory`, and acknowledging requires a caller-supplied `acknowledgement_key` that's persisted and checked before applying inventory changes, so replays return `{"replayed": true}` instead of double-applying. Preserve this pattern when adding new inventory-affecting flows.
+`detailed_prep_schedule` and `shopping_items` both follow propose-then-acknowledge:
+proposing (`add_detailed_prep_schedule`, `add_shopping_items`) never touches `inventory`,
+and acknowledging requires a caller-supplied `acknowledgement_key`. For prep, the key is
+persisted on the still-present `detailed_prep_schedule` row (`status='acknowledged'`
+short-circuits a replay). Shopping items are instead *deleted* the moment they're
+acknowledged (that's what "clears" them off the list), so there's no row left to check a
+key against on replay — instead, each deduction's `inventory_transactions.idempotency_key`
+(`{acknowledgement_key}:{shopping_item_id}`) is checked directly before applying it, and a
+match is treated as an already-applied replay. Either way, a replay returns
+`{"replayed": true}` instead of double-applying. Preserve this pattern when adding new
+inventory-affecting flows.

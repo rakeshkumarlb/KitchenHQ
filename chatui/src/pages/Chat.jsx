@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Bot, LoaderCircle, RotateCcw } from 'lucide-react';
+import { ArrowUp, Bot, History, LoaderCircle, Plus, RotateCcw } from 'lucide-react';
 import { kitchenApi } from '../services/api';
 
 const SESSION_KEY = 'kitchenhq.chat.session';
@@ -12,15 +12,27 @@ function getSessionId() {
 	return sessionId;
 }
 
+function setSessionId(sessionId) {
+	window.localStorage.setItem(SESSION_KEY, sessionId);
+}
+
 export default function Chat() {
-	const [sessionId] = useState(getSessionId);
+	const [sessionId, setSession] = useState(getSessionId);
 	const [messages, setMessages] = useState([]);
 	const [draft, setDraft] = useState('');
 	const [sending, setSending] = useState(false);
 	const [error, setError] = useState('');
+	const [recent, setRecent] = useState([]);
+	const [showHistory, setShowHistory] = useState(false);
 	const inputRef = useRef(null);
 
 	useEffect(() => inputRef.current?.focus(), []);
+
+	const loadRecent = async () => {
+		try { setRecent(await kitchenApi.listChatSessions()); } catch { /* history is a convenience, not critical */ }
+	};
+
+	useEffect(() => { loadRecent(); }, []);
 
 	const send = async (event) => {
 		event.preventDefault();
@@ -33,6 +45,7 @@ export default function Chat() {
 		try {
 			const response = await kitchenApi.chat(message, sessionId);
 			setMessages((current) => [...current, { role: 'assistant', content: response.reply }]);
+			loadRecent();
 		} catch (requestError) {
 			setError(requestError.message);
 		} finally {
@@ -41,7 +54,41 @@ export default function Chat() {
 		}
 	};
 
+	const openConversation = async (id) => {
+		setShowHistory(false);
+		setError('');
+		setSession(id);
+		setSessionId(id);
+		try {
+			const { messages: history } = await kitchenApi.getChatSession(id);
+			setMessages(history);
+		} catch (requestError) {
+			setError(requestError.message);
+		}
+		inputRef.current?.focus();
+	};
+
+	const startNew = () => {
+		setShowHistory(false);
+		setError('');
+		const id = crypto.randomUUID();
+		setSession(id);
+		setSessionId(id);
+		setMessages([]);
+		inputRef.current?.focus();
+	};
+
 	return <div className="chat-page page-content">
+		<div className="chat-toolbar">
+			<button type="button" className="secondary-button" onClick={() => setShowHistory((open) => !open)}><History size={15} /> Recent conversations</button>
+			<button type="button" className="secondary-button" onClick={startNew}><Plus size={15} /> New conversation</button>
+		</div>
+		{showHistory && <section className="chat-history soft-outset">
+			{recent.length ? recent.map((entry) => <button type="button" className={`chat-history-row ${entry.session_id === sessionId ? 'active' : ''}`} key={entry.session_id} onClick={() => openConversation(entry.session_id)}>
+				<span className="chat-history-preview">{entry.preview || 'New conversation'}</span>
+				<span className="chat-history-time">{entry.updated_at}</span>
+			</button>) : <div className="empty-state">No previous conversations yet.</div>}
+		</section>}
 		<div className="chat-placeholder">
 			<div className="chat-orb"><Bot size={30} /></div>
 			<p className="eyebrow">Your kitchen intelligence</p>

@@ -1,4 +1,4 @@
-import { ChefHat, ClipboardCheck, LayoutDashboard, MessageCircle, Package, Soup } from 'lucide-react';
+import { ChefHat, ClipboardCheck, LayoutDashboard, MessageCircle, Package, Soup, UserRound, Workflow } from 'lucide-react';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -6,6 +6,8 @@ const navItems = [
   { id: 'menu', label: 'Weekly Menu', icon: Soup },
   { id: 'tasks', label: 'Task List', icon: ClipboardCheck },
   { id: 'chat', label: 'Chat', icon: MessageCircle },
+  { id: 'automations', label: 'Automations', icon: Workflow },
+  { id: 'profile', label: 'Profile', icon: UserRound },
 ];
 
 export default function Sidebar({ page, onNavigate, open }) {

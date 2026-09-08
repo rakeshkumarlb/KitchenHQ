@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,24 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, Field, field_validator
 
+# Email notifications now live in agents/app/email/ (the agent is the only
+# process that sends mail). dbmcp owns data only - it has no SMTP config and no
+# send_*_email tools/routes any more.
+
 DATABASE_PATH = Path(os.environ.get("KITCHEN_DB_PATH", Path(__file__).with_name("kitchen.db")))
 VALID_DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+VALID_MEAL_TYPES = {"breakfast", "lunch", "snack", "dinner"}
+# weekly_menu.ingredients / .full_recipe are JSON string arrays (a list of short
+# plain-text lines). This is the generic method used for every seeded dish.
+_SEED_RECIPE_STEPS = [
+    "Wash and prepare every ingredient, then measure the spices and liquids into separate bowls.",
+    "Heat a wide pan over medium heat and add the oil. Add the aromatics and cook for 2 minutes until fragrant.",
+    "Add the main ingredients and cook for 5 minutes, stirring often so the edges colour evenly.",
+    "Add the grains, sauce, or liquid, reduce the heat, cover, and cook for 10 minutes until tender.",
+    "Remove the lid, taste, and adjust salt, acidity, and seasoning. Rest for 2 minutes.",
+    "Plate while warm, finish with the fresh garnish, and serve immediately.",
+]
+_MENU_LINES_LIMIT = 40
 allowed_hosts = [host.strip() for host in os.environ.get("MCP_ALLOWED_HOSTS", "localhost:18000,127.0.0.1:18000,dbmcp:18000,kitchenhq-db-mcp:18000").split(",") if host.strip()]
 mcp = FastMCP("KitchenHQ Database", transport_security=TransportSecuritySettings(allowed_hosts=allowed_hosts))
 
@@ -37,7 +54,7 @@ def initialize_database() -> None:
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS inventory (
                 id INTEGER PRIMARY KEY, item_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                category TEXT NOT NULL, quantity REAL NOT NULL CHECK (quantity >= 0),
+                category TEXT NOT NULL, quantity REAL NOT NULL,
                 unit TEXT NOT NULL, minimum_threshold REAL NOT NULL DEFAULT 0 CHECK (minimum_threshold >= 0),
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -51,18 +68,36 @@ def initialize_database() -> None:
                 dish_name TEXT NOT NULL, is_kid_friendly BOOLEAN NOT NULL, macros TEXT NOT NULL,
                 ingredients TEXT NOT NULL, full_recipe TEXT NOT NULL DEFAULT '',
                 kid_rating INTEGER CHECK (kid_rating BETWEEN 1 AND 5),
-                human_feedback TEXT
+                human_feedback TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS detailed_prep_schedule (
                 id INTEGER PRIMARY KEY, trigger_day TEXT NOT NULL, trigger_time TEXT NOT NULL,
-                task_type TEXT NOT NULL, detailed_instructions TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                detailed_instructions TEXT NOT NULL,
+                ingredients_used TEXT NOT NULL DEFAULT '[]',
                 is_completed BOOLEAN NOT NULL DEFAULT 0, human_notes TEXT,
-                ingredients_used TEXT, ingredients_created TEXT
+                status TEXT NOT NULL DEFAULT 'proposed',
+                acknowledgement_key TEXT
             );
         """)
         menu_columns = {row[1] for row in connection.execute("PRAGMA table_info(weekly_menu)")}
         if "full_recipe" not in menu_columns:
             connection.execute("ALTER TABLE weekly_menu ADD COLUMN full_recipe TEXT NOT NULL DEFAULT ''")
+        # `updated_at` records when a slot was last (re)planned - refreshed on every
+        # add_weekly_menu_item upsert. SQLite rejects `ADD COLUMN ... DEFAULT
+        # CURRENT_TIMESTAMP`, so add it nullable and backfill once.
+        if "updated_at" not in menu_columns:
+            connection.execute("ALTER TABLE weekly_menu ADD COLUMN updated_at DATETIME")
+            connection.execute("UPDATE weekly_menu SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
+        # weekly_menu holds exactly one row per (day_of_week, meal_type). Normalize
+        # casing, drop any duplicate rows left by older code paths or by two
+        # weekly_menu runs racing on the old check-then-insert, then enforce it with a
+        # unique index so add_weekly_menu_item is a true atomic upsert from here on.
+        connection.execute("UPDATE weekly_menu SET meal_type = LOWER(TRIM(meal_type)) WHERE meal_type <> LOWER(TRIM(meal_type))")
+        connection.execute("UPDATE weekly_menu SET day_of_week = LOWER(TRIM(day_of_week)) WHERE day_of_week <> LOWER(TRIM(day_of_week))")
+        connection.execute("DELETE FROM weekly_menu WHERE id NOT IN (SELECT MAX(id) FROM weekly_menu GROUP BY day_of_week, meal_type)")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_day_meal ON weekly_menu (day_of_week, meal_type)")
         if connection.execute("SELECT 1 FROM inventory WHERE item_name = 'Baby spinach'").fetchone() is None:
             connection.executemany(
                 "INSERT INTO inventory (item_name, category, quantity, unit, minimum_threshold) VALUES (?, ?, ?, ?, ?)",
@@ -75,36 +110,110 @@ def initialize_database() -> None:
                     ("Greek yogurt", "Dairy", 700, "g", 300),
                 ],
             )
-        if connection.execute("SELECT COUNT(*) FROM weekly_menu WHERE full_recipe <> ''").fetchone()[0] < 28:
+        if connection.execute("SELECT COUNT(*) FROM weekly_menu").fetchone()[0] < 28:
+            # INSERT OR IGNORE against the unique (day_of_week, meal_type) index: a
+            # re-seed after the agent overwrote rows leaves existing slots untouched
+            # instead of duplicating them.
             connection.executemany(
-                "INSERT INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (day, meal_type, dish, 1, macros, ingredients, f"Ingredients:\n{ingredients}\n\nMethod:\n1. Wash and prepare every ingredient, then measure the spices and liquids into separate bowls.\n2. Heat a wide pan over medium heat and add the oil. Add the aromatics and cook for 2 minutes until fragrant.\n3. Add the main ingredients and cook for 5 minutes, stirring often so the edges colour evenly.\n4. Add the grains, sauce, or liquid, reduce the heat, cover, and cook for 10 minutes until tender.\n5. Remove the lid, taste, and adjust salt, acidity, and seasoning. Rest for 2 minutes.\n6. Plate while warm, finish with the fresh garnish, and serve immediately." )
+                    (day, meal_type.lower(), dish, 1, macros,
+                     json.dumps([part.strip() for part in ingredients.split(",") if part.strip()]),
+                     json.dumps(_SEED_RECIPE_STEPS))
                     for day, meals in {
                         "monday": [("Breakfast", "Spinach masala eggs", "26g protein  /  18g carbs  /  20g fat", "Eggs, baby spinach, tomatoes"), ("Lunch", "Paneer tikka bowls", "32g protein  /  48g carbs  /  18g fat", "Paneer, brown rice, spinach, yogurt"), ("Snack", "Yogurt fruit crunch", "18g protein  /  26g carbs  /  8g fat", "Greek yogurt, banana, seeds"), ("Dinner", "Lemon herb rice skillet", "24g protein  /  52g carbs  /  14g fat", "Brown rice, spinach, yogurt")],
-                        "tuesday": [("Breakfast", "Savory paneer toast", "29g protein  /  31g carbs  /  16g fat", "Paneer, wholegrain bread, tomatoes"), ("Lunch", "Tomato egg shakshuka", "28g protein  /  22g carbs  /  16g fat", "Eggs, cherry tomatoes, spinach"), ("Snack", "Spiced yogurt dip", "14g protein  /  12g carbs  /  7g fat", "Greek yogurt, cucumber, herbs"), ("Dinner", "Tikka rice lettuce cups", "30g protein  /  39g carbs  /  15g fat", "Paneer, brown rice, lettuce")],
+                        "tuesday": [("Breakfast", "Savory paneer toast", "29g protein  /  31g carbs  /  16g fat", "Paneer, wholegrain bread, tomatoes"), ("Lunch", "Paneer tomato rice bowl", "28g protein  /  46g carbs  /  16g fat", "Paneer, brown rice, cherry tomatoes, spinach"), ("Snack", "Spiced yogurt dip", "14g protein  /  12g carbs  /  7g fat", "Greek yogurt, cucumber, herbs"), ("Dinner", "Tikka rice lettuce cups", "30g protein  /  39g carbs  /  15g fat", "Paneer, brown rice, lettuce")],
                         "wednesday": [("Breakfast", "Green breakfast bowl", "22g protein  /  35g carbs  /  12g fat", "Eggs, spinach, brown rice"), ("Lunch", "Green goddess rice", "24g protein  /  54g carbs  /  14g fat", "Brown rice, spinach, yogurt"), ("Snack", "Tomato paneer skewers", "19g protein  /  14g carbs  /  9g fat", "Paneer, cherry tomatoes, herbs"), ("Dinner", "Creamy spinach eggs", "27g protein  /  20g carbs  /  19g fat", "Eggs, spinach, Greek yogurt")],
                         "thursday": [("Breakfast", "Yogurt oat parfait", "20g protein  /  42g carbs  /  10g fat", "Greek yogurt, oats, banana"), ("Lunch", "Roasted paneer salad", "35g protein  /  20g carbs  /  21g fat", "Paneer, cherry tomatoes, spinach"), ("Snack", "Cucumber raita cup", "12g protein  /  10g carbs  /  5g fat", "Greek yogurt, cucumber, herbs"), ("Dinner", "Golden egg rice", "25g protein  /  46g carbs  /  15g fat", "Eggs, brown rice, spinach")],
-                        "friday": [("Breakfast", "Paneer breakfast hash", "31g protein  /  34g carbs  /  17g fat", "Paneer, brown rice, tomatoes"), ("Lunch", "Egg and spinach wraps", "30g protein  /  36g carbs  /  17g fat", "Eggs, spinach, yogurt"), ("Snack", "Cinnamon yogurt bowl", "17g protein  /  24g carbs  /  6g fat", "Greek yogurt, banana, seeds"), ("Dinner", "Friday tomato rice", "23g protein  /  55g carbs  /  12g fat", "Brown rice, tomatoes, eggs")],
+                        "friday": [("Breakfast", "Paneer breakfast hash", "31g protein  /  34g carbs  /  17g fat", "Paneer, brown rice, tomatoes"), ("Lunch", "Paneer spinach wraps", "30g protein  /  36g carbs  /  17g fat", "Paneer, spinach, yogurt, wholegrain wraps"), ("Snack", "Cinnamon yogurt bowl", "17g protein  /  24g carbs  /  6g fat", "Greek yogurt, banana, seeds"), ("Dinner", "Friday tomato rice", "23g protein  /  55g carbs  /  12g fat", "Brown rice, tomatoes, eggs")],
                         "saturday": [("Breakfast", "Herbed egg scramble", "25g protein  /  16g carbs  /  18g fat", "Eggs, spinach, herbs"), ("Lunch", "Paneer rainbow plate", "34g protein  /  32g carbs  /  19g fat", "Paneer, brown rice, tomatoes"), ("Snack", "Yogurt cucumber cups", "13g protein  /  11g carbs  /  5g fat", "Greek yogurt, cucumber"), ("Dinner", "One-pan spinach pilaf", "21g protein  /  51g carbs  /  13g fat", "Brown rice, spinach, yogurt")],
                         "sunday": [("Breakfast", "Weekend masala omelet", "27g protein  /  14g carbs  /  20g fat", "Eggs, tomatoes, spinach"), ("Lunch", "Sunday paneer bowls", "33g protein  /  49g carbs  /  18g fat", "Paneer, brown rice, yogurt"), ("Snack", "Fruit and yogurt lassi", "15g protein  /  30g carbs  /  5g fat", "Greek yogurt, banana, herbs"), ("Dinner", "Comfort tomato shakshuka", "28g protein  /  24g carbs  /  16g fat", "Eggs, tomatoes, spinach")],
                     }.items() for meal_type, dish, macros, ingredients in meals
                 ],
             )
+        # Migration: `ingredients_created` and `consumption_json` were dropped, and
+        # `ingredients_used`/`detailed_instructions` changed from free text to validated
+        # JSON (see add_detailed_prep_schedule's docstring for the shape). SQLite can't
+        # ALTER away a column, so an old row is rebuilt once (guarded on
+        # `ingredients_created` still being present); best-effort carries old
+        # consumption_json (inventory_id-keyed) over to the new item_name-keyed
+        # ingredients_used by resolving each id, and wraps a legacy free-text
+        # detailed_instructions/ingredients_used string as a single-line JSON array.
+        prep_columns = {row[1] for row in connection.execute("PRAGMA table_info(detailed_prep_schedule)")}
+        if "ingredients_created" in prep_columns:
+            old_rows = [dict(row) for row in connection.execute("SELECT * FROM detailed_prep_schedule")]
+            connection.executescript("""
+                ALTER TABLE detailed_prep_schedule RENAME TO _prep_schedule_migrate;
+                CREATE TABLE detailed_prep_schedule (
+                    id INTEGER PRIMARY KEY, trigger_day TEXT NOT NULL, trigger_time TEXT NOT NULL,
+                    task_type TEXT NOT NULL,
+                    detailed_instructions TEXT NOT NULL,
+                    ingredients_used TEXT NOT NULL DEFAULT '[]',
+                    is_completed BOOLEAN NOT NULL DEFAULT 0, human_notes TEXT,
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    acknowledgement_key TEXT
+                );
+            """)
+
+            def _as_line_list(value: Any) -> list[str]:
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        return [str(line) for line in parsed]
+                except (TypeError, ValueError):
+                    pass
+                return [str(value)] if value else []
+
+            for row in old_rows:
+                try:
+                    old_consumption = json.loads(row.get("consumption_json") or "[]")
+                except (TypeError, ValueError):
+                    old_consumption = []
+                new_ingredients = []
+                for entry in old_consumption if isinstance(old_consumption, list) else []:
+                    inventory_row = connection.execute(
+                        "SELECT item_name FROM inventory WHERE id = ?", (entry.get("inventory_id"),)
+                    ).fetchone()
+                    if inventory_row is not None:
+                        new_ingredients.append({
+                            "item_name": inventory_row["item_name"],
+                            "quantity": entry.get("quantity"),
+                            "unit": entry.get("unit", ""),
+                        })
+                connection.execute(
+                    "INSERT INTO detailed_prep_schedule (id, trigger_day, trigger_time, task_type, detailed_instructions, ingredients_used, is_completed, human_notes, status, acknowledgement_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["id"], row["trigger_day"], row["trigger_time"], row["task_type"],
+                        json.dumps(_as_line_list(row["detailed_instructions"])),
+                        json.dumps(new_ingredients),
+                        row["is_completed"], row["human_notes"],
+                        row.get("status", "proposed") or "proposed",
+                        row.get("acknowledgement_key"),
+                    ),
+                )
+            connection.execute("DROP TABLE _prep_schedule_migrate")
+
         if connection.execute("SELECT 1 FROM detailed_prep_schedule WHERE task_type = 'Morning prep'").fetchone() is None:
+            def _ingredients_used(*wants: tuple[str, float, str]) -> str:
+                return json.dumps([{"item_name": name, "quantity": quantity, "unit": unit} for name, quantity, unit in wants])
+
             connection.executemany(
-                "INSERT INTO detailed_prep_schedule (trigger_day, trigger_time, task_type, detailed_instructions, ingredients_used, ingredients_created) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO detailed_prep_schedule (trigger_day, trigger_time, task_type, detailed_instructions, ingredients_used) VALUES (?, ?, ?, ?, ?)",
                 [
-                    ("monday", "07:30", "Morning prep", "Wash spinach and portion yogurt for the day's bowls.", "Spinach, Greek yogurt", "Portioned yogurt"),
-                    ("tuesday", "17:00", "Dinner prep", "Dice tomatoes and press paneer before cooking.", "Cherry tomatoes, Paneer", "Ready-to-cook ingredients"),
-                    ("wednesday", "08:00", "Batch prep", "Cook brown rice and cool it in shallow containers.", "Brown rice", "Cooked brown rice"),
+                    ("monday", "07:30", "Morning prep",
+                     json.dumps(["Wash the spinach and pat it dry.", "Portion the Greek yogurt into the day's serving bowls."]),
+                     _ingredients_used(("Baby spinach", 1, "bags"), ("Greek yogurt", 200, "g"))),
+                    ("tuesday", "17:00", "Dinner prep",
+                     json.dumps(["Dice the cherry tomatoes.", "Press the paneer to remove excess water, then cube it."]),
+                     _ingredients_used(("Cherry tomatoes", 150, "g"), ("Paneer", 200, "g"))),
+                    ("wednesday", "08:00", "Batch prep",
+                     json.dumps(["Rinse the brown rice.", "Cook until tender, then spread it in shallow containers to cool quickly."]),
+                     _ingredients_used(("Brown rice", 0.5, "kg"))),
                 ],
             )
         columns = {row[1] for row in connection.execute("PRAGMA table_info(detailed_prep_schedule)")}
         if "status" not in columns:
             connection.execute("ALTER TABLE detailed_prep_schedule ADD COLUMN status TEXT NOT NULL DEFAULT 'proposed'")
-        if "consumption_json" not in columns:
-            connection.execute("ALTER TABLE detailed_prep_schedule ADD COLUMN consumption_json TEXT NOT NULL DEFAULT '[]'")
         if "acknowledgement_key" not in columns:
             connection.execute("ALTER TABLE detailed_prep_schedule ADD COLUMN acknowledgement_key TEXT")
         connection.execute("UPDATE detailed_prep_schedule SET status = 'completed' WHERE is_completed = 1 AND status = 'proposed'")
@@ -114,28 +223,20 @@ def initialize_database() -> None:
                 inventory_id INTEGER NOT NULL REFERENCES inventory(id),
                 quantity_change REAL NOT NULL CHECK (quantity_change <> 0),
                 quantity_before REAL NOT NULL,
-                quantity_after REAL NOT NULL CHECK (quantity_after >= 0),
+                quantity_after REAL NOT NULL,
                 reason TEXT NOT NULL,
                 source_type TEXT,
                 source_id INTEGER,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-            CREATE TABLE IF NOT EXISTS shopping_lists (
-                id INTEGER PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'proposed',
-                generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                acknowledged_at DATETIME,
-                acknowledgement_key TEXT UNIQUE
-            );
             CREATE TABLE IF NOT EXISTS shopping_items (
                 id INTEGER PRIMARY KEY,
-                shopping_list_id INTEGER NOT NULL REFERENCES shopping_lists(id),
-                item_name TEXT NOT NULL,
+                item_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 proposed_quantity REAL NOT NULL CHECK (proposed_quantity > 0),
-                actual_quantity REAL CHECK (actual_quantity >= 0),
                 unit TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'proposed'
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS agent_runs (
                 id INTEGER PRIMARY KEY,
@@ -152,7 +253,131 @@ def initialize_database() -> None:
                 messages_json TEXT NOT NULL DEFAULT '[]',
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS user_profile (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                name TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL DEFAULT '',
+                cc_emails TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                favorite_recipes TEXT NOT NULL DEFAULT '[]',
+                notify_on_task_creation INTEGER NOT NULL DEFAULT 1,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
         """)
+        connection.execute("INSERT OR IGNORE INTO user_profile (id, name) VALUES (1, 'Alex Kim')")
+        # Migration: `phone` was dropped and `cc_emails` / `favorite_recipes` added.
+        # SQLite can't ALTER away a column, so an old row is rebuilt once (guarded on
+        # `phone` still being present); newer DBs just take the ADD COLUMN backfills.
+        profile_columns = {row[1] for row in connection.execute("PRAGMA table_info(user_profile)")}
+        if "phone" in profile_columns:
+            connection.executescript("""
+                ALTER TABLE user_profile RENAME TO _user_profile_migrate;
+                CREATE TABLE user_profile (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    name TEXT NOT NULL DEFAULT '',
+                    email TEXT NOT NULL DEFAULT '',
+                    cc_emails TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    favorite_recipes TEXT NOT NULL DEFAULT '[]',
+                    notify_on_task_creation INTEGER NOT NULL DEFAULT 1,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO user_profile (id, name, email, notes, notify_on_task_creation, updated_at)
+                    SELECT id, name, email, notes, notify_on_task_creation, updated_at FROM _user_profile_migrate;
+                DROP TABLE _user_profile_migrate;
+            """)
+        else:
+            if "cc_emails" not in profile_columns:
+                connection.execute("ALTER TABLE user_profile ADD COLUMN cc_emails TEXT NOT NULL DEFAULT ''")
+            if "favorite_recipes" not in profile_columns:
+                connection.execute("ALTER TABLE user_profile ADD COLUMN favorite_recipes TEXT NOT NULL DEFAULT '[]'")
+        # Migration: shopping_lists is gone - shopping_items is now a single flat,
+        # unique-by-item_name pending pool (no more per-run "list" grouping; a purchase
+        # deletes its row instead of flipping a list's status). Roll forward whatever was
+        # still pending (parent list not yet purchased) under the new unique-name upsert
+        # rule, merging any name collisions by summing quantity; anything already
+        # purchased is history that lived only for the old idempotent-replay check and
+        # isn't needed once shopping_items itself is deleted-on-purchase.
+        shopping_items_columns = {row[1] for row in connection.execute("PRAGMA table_info(shopping_items)")}
+        if "shopping_list_id" in shopping_items_columns:
+            has_shopping_lists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shopping_lists'"
+            ).fetchone() is not None
+            if has_shopping_lists:
+                pending = connection.execute("""
+                    SELECT si.item_name, si.proposed_quantity, si.unit
+                    FROM shopping_items si
+                    JOIN shopping_lists sl ON sl.id = si.shopping_list_id
+                    WHERE sl.status <> 'purchased' AND si.status <> 'purchased'
+                    ORDER BY si.id
+                """).fetchall()
+            else:
+                pending = []
+            connection.execute("DROP TABLE shopping_items")
+            connection.execute("""
+                CREATE TABLE shopping_items (
+                    id INTEGER PRIMARY KEY,
+                    item_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    proposed_quantity REAL NOT NULL CHECK (proposed_quantity > 0),
+                    unit TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for row in pending:
+                connection.execute(
+                    """
+                    INSERT INTO shopping_items (item_name, proposed_quantity, unit) VALUES (?, ?, ?)
+                    ON CONFLICT(item_name) DO UPDATE SET
+                        proposed_quantity = proposed_quantity + excluded.proposed_quantity,
+                        unit = excluded.unit,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (row["item_name"], row["proposed_quantity"], row["unit"]),
+                )
+        connection.execute("DROP TABLE IF EXISTS shopping_lists")
+        # Migration: drop the historical `quantity >= 0` / `quantity_after >= 0` CHECK
+        # constraints so prep acknowledgements can push a tracked balance negative
+        # (SQLite can't ALTER away a CHECK - the table has to be rebuilt). Guarded on
+        # the constraint text still being present, so it runs once per old database.
+        inventory_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory'"
+        ).fetchone()
+        if inventory_sql and "quantity >= 0" in inventory_sql[0]:
+            connection.executescript("""
+                ALTER TABLE inventory RENAME TO _inventory_migrate;
+                CREATE TABLE inventory (
+                    id INTEGER PRIMARY KEY, item_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    category TEXT NOT NULL, quantity REAL NOT NULL,
+                    unit TEXT NOT NULL, minimum_threshold REAL NOT NULL DEFAULT 0 CHECK (minimum_threshold >= 0),
+                    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO inventory (id, item_name, category, quantity, unit, minimum_threshold, last_updated)
+                    SELECT id, item_name, category, quantity, unit, minimum_threshold, last_updated FROM _inventory_migrate;
+                DROP TABLE _inventory_migrate;
+            """)
+        transactions_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory_transactions'"
+        ).fetchone()
+        if transactions_sql and "quantity_after >= 0" in transactions_sql[0]:
+            connection.executescript("""
+                ALTER TABLE inventory_transactions RENAME TO _transactions_migrate;
+                CREATE TABLE inventory_transactions (
+                    id INTEGER PRIMARY KEY,
+                    inventory_id INTEGER NOT NULL REFERENCES inventory(id),
+                    quantity_change REAL NOT NULL CHECK (quantity_change <> 0),
+                    quantity_before REAL NOT NULL,
+                    quantity_after REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    source_type TEXT,
+                    source_id INTEGER,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO inventory_transactions (id, inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key, created_at)
+                    SELECT id, inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key, created_at FROM _transactions_migrate;
+                DROP TABLE _transactions_migrate;
+            """)
 
 
 def _record(table: str, record_id: int) -> dict[str, Any]:
@@ -168,6 +393,29 @@ def _validate_day(day_of_week: str) -> str:
     if normalized not in VALID_DAYS:
         raise ValueError("day_of_week must be a full weekday name")
     return normalized
+
+
+def _validate_meal_type(meal_type: str) -> str:
+    normalized = meal_type.strip().lower()
+    if normalized not in VALID_MEAL_TYPES:
+        raise ValueError(f"meal_type must be one of {sorted(VALID_MEAL_TYPES)}")
+    return normalized
+
+
+def _clean_menu_lines(value: Any, *, field: str, required: bool) -> list[str]:
+    """Normalize a weekly_menu ingredients/full_recipe value into a clean string list.
+
+    The columns store a JSON string array (a list of short plain-text lines). Accepts a
+    list; trims blanks; caps the count so a runaway model can't bloat a row.
+    """
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list of strings")
+    lines = [str(item).strip() for item in value if str(item).strip()]
+    if required and not lines:
+        raise ValueError(f"{field} must contain at least one non-empty string")
+    if len(lines) > _MENU_LINES_LIMIT:
+        raise ValueError(f"{field} cannot have more than {_MENU_LINES_LIMIT} items")
+    return lines
 
 
 @mcp.tool()
@@ -186,16 +434,20 @@ def get_weekly_menu() -> list[dict[str, Any]]:
 
 @mcp.tool()
 def get_prep_schedules() -> list[dict[str, Any]]:
-    """Read preparation schedules."""
+    """Read preparation schedules (cancelled tasks are excluded)."""
     with _connect() as connection:
-        return [dict(row) for row in connection.execute("SELECT * FROM detailed_prep_schedule ORDER BY is_completed, id")]
+        return [dict(row) for row in connection.execute("SELECT * FROM detailed_prep_schedule WHERE status <> 'cancelled' ORDER BY is_completed, id")]
 
 
 @mcp.tool()
-def get_shopping_lists() -> list[dict[str, Any]]:
-    """Read shopping proposals and their items."""
+def get_shopping_items() -> list[dict[str, Any]]:
+    """Read the pending shopping list - one row per item still needing to be bought.
+
+    There is only ever one shopping list: every row here is currently pending. An item
+    disappears from this list the moment it's acknowledged as purchased (see
+    acknowledge_shopping_items) - nothing here ever carries a "purchased" status."""
     with _connect() as connection:
-        return [{**dict(row), "items": [dict(item) for item in connection.execute("SELECT * FROM shopping_items WHERE shopping_list_id = ?", (row["id"],))]} for row in connection.execute("SELECT * FROM shopping_lists ORDER BY id DESC")]
+        return [dict(row) for row in connection.execute("SELECT * FROM shopping_items ORDER BY item_name")]
 
 
 def _menu_policy_violations(menu_items: list[dict[str, Any]]) -> list[str]:
@@ -277,127 +529,284 @@ def remove_or_discard_inventory(item_id: int, quantity: float, reason: str = "Di
 
 
 @mcp.tool()
-def add_weekly_menu_item(day_of_week: str, meal_type: str, dish_name: str, is_kid_friendly: bool, macros: str, ingredients: str, full_recipe: str = "") -> dict[str, Any]:
-    """Add or update one meal in the weekly menu."""
+def add_weekly_menu_item(day_of_week: str, meal_type: str, dish_name: str, is_kid_friendly: bool, macros: str, ingredients: list[str], full_recipe: list[str] | None = None) -> dict[str, Any]:
+    """Add or replace one meal in the weekly menu.
+
+    This is a true upsert on (day_of_week, meal_type): a plan is built by calling this
+    once per slot (all seven days monday..sunday x breakfast/lunch/snack/dinner).
+    Re-saving a slot overwrites it (and refreshes its updated_at); a unique index
+    guarantees exactly one row per slot even under concurrent runs.
+
+    Parameters:
+      day_of_week: Day name for the meal slot (for example: "Monday", "Tuesday", etc.).
+      meal_type: Meal slot type (for example: "breakfast", "lunch", "snack", or "dinner").
+      dish_name: Human-readable name of the dish being planned for that meal slot.
+      is_kid_friendly: Whether the dish is appropriate for children. Defaults to True.
+      macros: Optional nutrition summary string for the dish, such as a textual macro breakdown.
+      ingredients: ordered list of ingredient strings with quantities, plain text (no
+        HTML / markdown). Stored as a JSON array; the UI and emails render it as a list.
+      full_recipe: ordered list of method-step strings, plain text (no HTML / markdown).
+        Stored as a JSON array; rendered as a numbered list.
+    """
     day = _validate_day(day_of_week)
-    meal = meal_type.strip()
+    meal = _validate_meal_type(meal_type)
+    ingredient_lines = _clean_menu_lines(ingredients, field="ingredients", required=True)
+    recipe_lines = _clean_menu_lines(full_recipe or [], field="full_recipe", required=False)
     with _connect() as connection:
-        existing = connection.execute("SELECT id FROM weekly_menu WHERE day_of_week = ? AND meal_type = ?", (day, meal)).fetchone()
-        if existing is not None:
-            connection.execute("UPDATE weekly_menu SET dish_name = ?, is_kid_friendly = ?, macros = ?, ingredients = ?, full_recipe = ? WHERE id = ?", (dish_name.strip(), int(is_kid_friendly), macros, ingredients, full_recipe.strip(), existing["id"]))
-            menu_item_id = existing["id"]
-        else:
-            cursor = connection.execute("INSERT INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe) VALUES (?, ?, ?, ?, ?, ?, ?)", (day, meal, dish_name.strip(), int(is_kid_friendly), macros, ingredients, full_recipe.strip()))
-            menu_item_id = cursor.lastrowid
-    return _record("weekly_menu", menu_item_id)
-
-
-@mcp.tool()
-def add_weekly_menu_plan(menu_items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Validate and save a complete meal plan atomically."""
-    if len(menu_items) < 5:
-        raise ValueError("a weekly plan requires at least five menu items")
-    policy = validate_weekly_menu_policy(menu_items)
-    if not policy["valid"]:
-        raise ValueError("Meal plan policy violations: " + "; ".join(policy["violations"]))
-    saved = []
-    for item in menu_items:
-        saved.append(
-            add_weekly_menu_item(
-                day_of_week=str(item["day_of_week"]),
-                meal_type=str(item["meal_type"]),
-                dish_name=str(item["dish_name"]),
-                is_kid_friendly=bool(item.get("is_kid_friendly", False)),
-                macros=str(item["macros"]),
-                ingredients=str(item["ingredients"]),
-                full_recipe=str(item.get("full_recipe", "")),
-            )
+        connection.execute(
+            """
+            INSERT INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe, kid_rating, human_feedback, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(day_of_week, meal_type) DO UPDATE SET
+                dish_name = excluded.dish_name,
+                is_kid_friendly = excluded.is_kid_friendly,
+                macros = excluded.macros,
+                ingredients = excluded.ingredients,
+                full_recipe = excluded.full_recipe,
+                kid_rating = NULL,
+                human_feedback = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (day, meal, dish_name.strip(), int(is_kid_friendly), macros, json.dumps(ingredient_lines), json.dumps(recipe_lines), None, None),
         )
-    return {"items": saved}
+        row = connection.execute("SELECT * FROM weekly_menu WHERE day_of_week = ? AND meal_type = ?", (day, meal)).fetchone()
+    return dict(row)
+
+
+# --- soft-deleted: no caller ----------------------------------------------------
+# `add_weekly_menu_plan` (whole-week validate-then-write) had exactly one entry point,
+# `POST /api/weekly-menu/plan`, which nothing calls (chatui builds the week slot by
+# slot; the agent uses add_weekly_menu_item + validate_weekly_menu_policy). Kept
+# commented for reference; delete once confirmed unneeded.
+#
+# def add_weekly_menu_plan(menu_items: list[dict[str, Any]]) -> dict[str, Any]:
+#     """Validate and save a complete meal plan atomically."""
+#     if len(menu_items) < 5:
+#         raise ValueError("a weekly plan requires at least five menu items")
+#     for item in menu_items:
+#         _validate_day(str(item.get("day_of_week", "")))
+#         _validate_meal_type(str(item.get("meal_type", "")))
+#     policy = validate_weekly_menu_policy(menu_items)
+#     if not policy["valid"]:
+#         raise ValueError("Meal plan policy violations: " + "; ".join(policy["violations"]))
+#     saved = []
+#     for item in menu_items:
+#         saved.append(
+#             add_weekly_menu_item(
+#                 day_of_week=str(item["day_of_week"]),
+#                 meal_type=str(item["meal_type"]),
+#                 dish_name=str(item["dish_name"]),
+#                 is_kid_friendly=bool(item.get("is_kid_friendly", False)),
+#                 macros=str(item["macros"]),
+#                 ingredients=list(item.get("ingredients") or []),
+#                 full_recipe=list(item.get("full_recipe") or []),
+#             )
+#         )
+#     return {"items": saved}
+
+
+FAVORITE_RECIPES_LIMIT = 10
+
+
+def _sync_favorite_recipes(connection: sqlite3.Connection, dish_name: str, rating: int) -> None:
+    """Keep user_profile.favorite_recipes as the <=10 most recently top-rated dishes.
+
+    A 4- or 5-star rating moves the dish to the front (newest first); any lower rating
+    demotes it out. The list is trimmed to FAVORITE_RECIPES_LIMIT, so an older
+    favourite falls off once ten fresher dishes have been top-rated.
+    """
+    dish = (dish_name or "").strip()
+    if not dish:
+        return
+    row = connection.execute("SELECT favorite_recipes FROM user_profile WHERE id = 1").fetchone()
+    try:
+        favorites = json.loads(row["favorite_recipes"]) if row and row["favorite_recipes"] else []
+        if not isinstance(favorites, list):
+            favorites = []
+    except (json.JSONDecodeError, TypeError):
+        favorites = []
+    favorites = [f for f in favorites if str(f.get("dish_name", "")).strip().lower() != dish.lower()]
+    if rating >= 4:
+        favorites.insert(0, {
+            "dish_name": dish,
+            "rating": rating,
+            "rated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    favorites = favorites[:FAVORITE_RECIPES_LIMIT]
+    connection.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)")
+    connection.execute(
+        "UPDATE user_profile SET favorite_recipes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        (json.dumps(favorites),),
+    )
 
 
 @mcp.tool()
 def capture_weekly_menu_rating(menu_item_id: int, kid_rating: int, human_feedback: str = "") -> dict[str, Any]:
-    """Capture a human rating from 1 through 5 for a weekly menu item."""
+    """Capture a human rating from 1 through 5 for a weekly menu item.
+
+    A rating of 4 or 5 also records the dish in the household's top-10 favourite
+    recipes (newest first); a lower rating removes it if it was there.
+    """
     if not 1 <= kid_rating <= 5:
         raise ValueError("kid_rating must be between 1 and 5")
     with _connect() as connection:
-        if connection.execute("SELECT 1 FROM weekly_menu WHERE id = ?", (menu_item_id,)).fetchone() is None:
+        menu_row = connection.execute("SELECT dish_name FROM weekly_menu WHERE id = ?", (menu_item_id,)).fetchone() 
+        if menu_row is None:
             raise ValueError(f"No weekly_menu record found for id {menu_item_id}")
         connection.execute("UPDATE weekly_menu SET kid_rating = ?, human_feedback = ? WHERE id = ?", (kid_rating, human_feedback, menu_item_id))
+        _sync_favorite_recipes(connection, menu_row["dish_name"], kid_rating)
     return _record("weekly_menu", menu_item_id)
 
 
+def _normalize_ingredients_used(ingredients_used: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Validate raw {item_name, quantity, unit} entries into a clean deduction list.
+
+    Keyed by item_name (case-insensitive), matching inventory's own key - never by
+    inventory_id, which the caller has no reliable way to know ahead of time."""
+    normalized: list[dict[str, Any]] = []
+    for item in ingredients_used or []:
+        try:
+            name = str(item["item_name"]).strip()
+            quantity = float(item["quantity"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("each ingredients_used entry requires item_name and numeric quantity") from error
+        if not name:
+            raise ValueError("each ingredients_used entry requires a non-empty item_name")
+        if quantity <= 0:
+            raise ValueError("ingredients_used quantities must be greater than zero")
+        normalized.append({"item_name": name, "quantity": quantity, "unit": str(item.get("unit", "")).strip()})
+    return normalized
+
+
 @mcp.tool()
-def add_detailed_prep_schedule(trigger_day: str, trigger_time: str, task_type: str, detailed_instructions: str, ingredients_used: str = "", ingredients_created: str = "") -> dict[str, Any]:
-    """Add a detailed preparation task for human execution."""
+def add_detailed_prep_schedule(
+    trigger_day: str,
+    trigger_time: str,
+    task_type: str,
+    detailed_instructions: list[str],
+    ingredients_used: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Add a detailed preparation task for a human to execute.
+
+    This is the ONLY place that supplies what the task will consume - there is no
+    separate step to add it later, so get_inventory first and fill in ingredients_used
+    completely before saving.
+
+    Parameters:
+      detailed_instructions: ordered list of short, plain-text instruction steps, e.g.
+        ["Dice the onions and tomatoes.", "Heat oil in a wide pan over medium heat.",
+         "Add the onions and cook 3 minutes until soft."]
+        One step per list entry - do not number them yourself and do not pass a single
+        text blob; it must be a JSON array of strings (same convention as weekly_menu's
+        full_recipe).
+      ingredients_used: every ingredient this task will consume, as a JSON array of
+        {item_name, quantity, unit} objects, e.g.
+        [{"item_name": "Baby spinach", "quantity": 1, "unit": "bags"},
+         {"item_name": "Greek yogurt", "quantity": 200, "unit": "g"}]
+        item_name must match (case-insensitively) an item_name already in inventory -
+        copy the exact spelling from get_inventory. The moment a human checks this task
+        complete, capture_prep_completion_status looks up each item_name here against
+        current inventory and deducts quantity from it automatically, recording an
+        inventory_transactions row; an item_name with no matching inventory row is
+        skipped rather than failing. Leaving this empty (or omitting an ingredient the
+        task genuinely uses) means checking the task off will never touch that stock.
+    """
+    instructions = _clean_menu_lines(detailed_instructions, field="detailed_instructions", required=True)
+    ingredients = _normalize_ingredients_used(ingredients_used)
     with _connect() as connection:
-        cursor = connection.execute("INSERT INTO detailed_prep_schedule (trigger_day, trigger_time, task_type, detailed_instructions, ingredients_used, ingredients_created) VALUES (?, ?, ?, ?, ?, ?)", (_validate_day(trigger_day), trigger_time.strip(), task_type.strip(), detailed_instructions, ingredients_used, ingredients_created))
+        cursor = connection.execute(
+            "INSERT INTO detailed_prep_schedule (trigger_day, trigger_time, task_type, detailed_instructions, ingredients_used) VALUES (?, ?, ?, ?, ?)",
+            (_validate_day(trigger_day), trigger_time.strip(), task_type.strip(), json.dumps(instructions), json.dumps(ingredients)),
+        )
     return _record("detailed_prep_schedule", cursor.lastrowid)
 
 
 @mcp.tool()
 def capture_prep_completion_status(prep_schedule_id: int, is_completed: bool, human_notes: str = "") -> dict[str, Any]:
-    """Capture whether a human completed a detailed preparation task."""
-    with _connect() as connection:
-        if connection.execute("SELECT 1 FROM detailed_prep_schedule WHERE id = ?", (prep_schedule_id,)).fetchone() is None:
-            raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
-        connection.execute("UPDATE detailed_prep_schedule SET is_completed = ?, human_notes = ? WHERE id = ?", (int(is_completed), human_notes, prep_schedule_id))
-    return _record("detailed_prep_schedule", prep_schedule_id)
+    """Capture whether a human completed a detailed preparation task.
 
-
-def acknowledge_prep_schedule(
-    prep_schedule_id: int,
-    acknowledgement_key: str,
-    consumed_items: list[dict[str, Any]],
-    human_notes: str = "",
-) -> dict[str, Any]:
-    """Acknowledge prep and deduct explicitly quantified ingredients exactly once."""
-    if not acknowledgement_key.strip():
-        raise ValueError("acknowledgement_key is required")
-    if not consumed_items:
-        raise ValueError("consumed_items must contain explicit quantities")
+    Checking a task complete (is_completed=True) looks up every {item_name, quantity,
+    unit} entry the task was saved with (see add_detailed_prep_schedule) against current
+    inventory by item_name (case-insensitive) and deducts quantity from each match
+    exactly once, recording an inventory_transactions row - safe to call again with
+    is_completed=True on an already-acknowledged task (idempotent no-op, returns the
+    task unchanged). An item_name with no matching inventory row is skipped rather than
+    failing the whole task. Deductions are never blocked by low stock - a match is
+    deducted even if it pushes inventory negative, so the shortfall stays visible until
+    a shopping run tops it back up. A task saved with no ingredients_used is just marked
+    done and can still be unchecked; once a task WITH ingredients has been deducted it
+    is finalized ('acknowledged') and cannot be reopened - a later is_completed=False
+    call is rejected.
+    """
     with _connect() as connection:
         task = connection.execute("SELECT * FROM detailed_prep_schedule WHERE id = ?", (prep_schedule_id,)).fetchone()
         if task is None:
             raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
-        if task["acknowledgement_key"] == acknowledgement_key or task["status"] == "acknowledged":
-            return {"task": dict(task), "replayed": True}
-        if task["status"] == "completed":
-            raise ValueError("prep schedule is already completed")
+        if task["status"] == "cancelled":
+            raise ValueError("prep schedule is cancelled")
+        if task["status"] == "acknowledged":
+            if is_completed:
+                return dict(task)  # already finalized - idempotent no-op
+            raise ValueError("prep schedule ingredients were already deducted and cannot be reopened")
 
-        normalized_items = []
-        for item in consumed_items:
-            try:
-                inventory_id = int(item["inventory_id"])
-                quantity = float(item["quantity"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError("each consumed item requires inventory_id and numeric quantity") from error
-            if quantity <= 0:
-                raise ValueError("consumed quantities must be greater than zero")
-            normalized_items.append({"inventory_id": inventory_id, "quantity": quantity, "unit": str(item.get("unit", ""))})
+        if not is_completed:
+            connection.execute(
+                "UPDATE detailed_prep_schedule SET is_completed = 0, status = 'proposed', human_notes = ? WHERE id = ?",
+                (human_notes, prep_schedule_id),
+            )
+            return _record_in_connection(connection, "detailed_prep_schedule", prep_schedule_id)
 
-        for item in normalized_items:
-            inventory = connection.execute("SELECT * FROM inventory WHERE id = ?", (item["inventory_id"],)).fetchone()
+        ingredients = json.loads(task["ingredients_used"] or "[]")
+
+        if not ingredients:
+            # Nothing to deduct - mark done without the "ingredients already deducted"
+            # lock, so a plain task (e.g. "Wipe counters") can still be unchecked.
+            connection.execute(
+                "UPDATE detailed_prep_schedule SET is_completed = 1, status = 'completed', human_notes = ? WHERE id = ?",
+                (human_notes, prep_schedule_id),
+            )
+            return _record_in_connection(connection, "detailed_prep_schedule", prep_schedule_id)
+
+        acknowledgement_key = f"prep-{prep_schedule_id}-complete"
+
+        # Prep deductions are never blocked by low stock: the household cooked with what
+        # it physically had, even if our tracked number lagged. Present items are
+        # deducted and allowed to go negative, so the shortfall stays visible until a
+        # shopping run tops it back up; an item_name with no matching inventory row is
+        # simply skipped rather than failing the acknowledgement.
+        for index, entry in enumerate(ingredients):
+            inventory = connection.execute("SELECT * FROM inventory WHERE item_name = ?", (entry["item_name"],)).fetchone()
             if inventory is None:
-                raise ValueError(f"No inventory record found for id {item['inventory_id']}")
-            if inventory["quantity"] < item["quantity"]:
-                raise ValueError(f"Insufficient inventory for {inventory['item_name']}")
-
-        for index, item in enumerate(normalized_items):
-            inventory = connection.execute("SELECT quantity FROM inventory WHERE id = ?", (item["inventory_id"],)).fetchone()
+                continue
             before = inventory["quantity"]
-            after = before - item["quantity"]
-            connection.execute("UPDATE inventory SET quantity = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (after, item["inventory_id"]))
+            after = before - entry["quantity"]
+            connection.execute("UPDATE inventory SET quantity = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (after, inventory["id"]))
             connection.execute(
                 "INSERT INTO inventory_transactions (inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (item["inventory_id"], -item["quantity"], before, after, "Prep acknowledged", "prep_schedule", prep_schedule_id, f"{acknowledgement_key}:{index}"),
+                (inventory["id"], -entry["quantity"], before, after, "Prep acknowledged", "prep_schedule", prep_schedule_id, f"{acknowledgement_key}:{index}"),
             )
         connection.execute(
-            "UPDATE detailed_prep_schedule SET is_completed = 1, status = 'acknowledged', acknowledgement_key = ?, consumption_json = ?, human_notes = ? WHERE id = ?",
-            (acknowledgement_key, json.dumps(normalized_items), human_notes, prep_schedule_id),
+            "UPDATE detailed_prep_schedule SET is_completed = 1, status = 'acknowledged', acknowledgement_key = ?, human_notes = ? WHERE id = ?",
+            (acknowledgement_key, human_notes, prep_schedule_id),
         )
-        return {"task": _record_in_connection(connection, "detailed_prep_schedule", prep_schedule_id), "replayed": False}
+        return _record_in_connection(connection, "detailed_prep_schedule", prep_schedule_id)
+
+
+def cancel_prep_schedule(prep_schedule_id: int, human_notes: str = "") -> dict[str, Any]:
+    """Soft-cancel a prep task: it drops out of every schedule/dashboard view but the
+    row (and any history) is kept. A task whose ingredients were already deducted
+    cannot be cancelled."""
+    with _connect() as connection:
+        task = connection.execute("SELECT * FROM detailed_prep_schedule WHERE id = ?", (prep_schedule_id,)).fetchone()
+        if task is None:
+            raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
+        if task["status"] == "acknowledged":
+            raise ValueError("cannot cancel a task whose ingredients were already deducted")
+        connection.execute(
+            "UPDATE detailed_prep_schedule SET status = 'cancelled', is_completed = 0, human_notes = ? WHERE id = ?",
+            (human_notes or task["human_notes"], prep_schedule_id),
+        )
+    return _record("detailed_prep_schedule", prep_schedule_id)
 
 
 def _record_in_connection(connection: sqlite3.Connection, table: str, record_id: int) -> dict[str, Any]:
@@ -406,13 +815,26 @@ def _record_in_connection(connection: sqlite3.Connection, table: str, record_id:
 
 
 @mcp.tool()
-def create_shopping_list(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Persist a validated shopping proposal without changing inventory."""
+def add_shopping_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add ingredients to the one pending shopping list, merging into whatever is
+    already there - never touches inventory.
+
+    This is an upsert keyed on item_name (case-insensitive): call it any time something
+    is newly needed, whether or not a list already exists. If an item with the same name
+    is already pending, its proposed_quantity is increased by the amount given here (and
+    its unit is overwritten to whatever this call passes) instead of creating a second
+    row - there is no separate "create" vs "append" choice to make, and no need to call
+    get_shopping_items first just to decide that. Never propose an item_name that's
+    already pending unless you actually want to add more of it.
+
+    Each entry is {item_name, proposed_quantity, unit}. Returns the current state of
+    every item this call touched. See acknowledge_shopping_items to record an actual
+    purchase and move quantities into inventory.
+    """
     if not items:
         raise ValueError("items must contain at least one item")
     with _connect() as connection:
-        cursor = connection.execute("INSERT INTO shopping_lists DEFAULT VALUES")
-        list_id = cursor.lastrowid
+        touched_names = []
         for item in items:
             try:
                 name, quantity, unit = str(item["item_name"]).strip(), float(item["proposed_quantity"]), str(item["unit"]).strip()
@@ -420,42 +842,211 @@ def create_shopping_list(items: list[dict[str, Any]]) -> dict[str, Any]:
                 raise ValueError("each shopping item requires item_name, proposed_quantity, and unit") from error
             if not name or quantity <= 0 or not unit:
                 raise ValueError("shopping item names, quantities, and units must be valid")
-            connection.execute("INSERT INTO shopping_items (shopping_list_id, item_name, proposed_quantity, unit) VALUES (?, ?, ?, ?)", (list_id, name, quantity, unit))
-        return {"list": _record_in_connection(connection, "shopping_lists", list_id), "items": [dict(row) for row in connection.execute("SELECT * FROM shopping_items WHERE shopping_list_id = ?", (list_id,))]}
+            connection.execute(
+                """
+                INSERT INTO shopping_items (item_name, proposed_quantity, unit) VALUES (?, ?, ?)
+                ON CONFLICT(item_name) DO UPDATE SET
+                    proposed_quantity = proposed_quantity + excluded.proposed_quantity,
+                    unit = excluded.unit,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (name, quantity, unit),
+            )
+            touched_names.append(name)
+        placeholders = ",".join("?" * len(touched_names))
+        return [dict(row) for row in connection.execute(
+            f"SELECT * FROM shopping_items WHERE item_name IN ({placeholders}) ORDER BY item_name", touched_names,
+        )]
 
 
-def acknowledge_shopping_list(shopping_list_id: int, acknowledgement_key: str, purchased_items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Add actual purchased quantities to inventory exactly once."""
+@mcp.tool()
+def edit_shopping_item(shopping_item_id: int, proposed_quantity: float | None = None, unit: str | None = None) -> dict[str, Any]:
+    """Correct a pending shopping item's quantity and/or unit in place. Pass whichever of
+    proposed_quantity/unit changed; the other is left as-is."""
+    if proposed_quantity is None and unit is None:
+        raise ValueError("provide proposed_quantity and/or unit to change")
+    if proposed_quantity is not None and proposed_quantity <= 0:
+        raise ValueError("proposed_quantity must be greater than zero")
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM shopping_items WHERE id = ?", (shopping_item_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"No shopping item found for id {shopping_item_id}")
+        connection.execute(
+            "UPDATE shopping_items SET proposed_quantity = ?, unit = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (proposed_quantity if proposed_quantity is not None else row["proposed_quantity"],
+             unit.strip() if unit else row["unit"], shopping_item_id),
+        )
+    return _record("shopping_items", shopping_item_id)
+
+
+@mcp.tool()
+def delete_shopping_item(shopping_item_id: int) -> dict[str, Any]:
+    """Remove one pending item from the shopping list without buying it (e.g. it's no
+    longer needed, or it was a mistaken suggestion). Returns the row as it was."""
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM shopping_items WHERE id = ?", (shopping_item_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"No shopping item found for id {shopping_item_id}")
+        connection.execute("DELETE FROM shopping_items WHERE id = ?", (shopping_item_id,))
+    return dict(row)
+
+
+@mcp.tool()
+def clear_shopping_items() -> dict[str, Any]:
+    """Remove every pending shopping item without buying any of them (start the list
+    over from empty). Returns how many rows were cleared."""
+    with _connect() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM shopping_items").fetchone()[0]
+        connection.execute("DELETE FROM shopping_items")
+    return {"cleared": count}
+
+
+def acknowledge_shopping_items(acknowledgement_key: str, purchased_items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Move purchased quantities into inventory and clear those items off the pending
+    shopping list, each exactly once.
+
+    purchased_items is [{shopping_item_id, actual_quantity}]. Inventory is matched (and
+    created if it doesn't exist yet) by the shopping item's item_name - never by
+    inventory_id, since that's an internal id the caller shouldn't need to track. Once
+    applied, the shopping_items row is deleted (this is what "clears" it off the list);
+    a replay with the same acknowledgement_key (e.g. a retried request) is a safe no-op
+    that will not double-add stock, even though by then the row it originally matched is
+    already gone.
+    """
     if not acknowledgement_key.strip() or not purchased_items:
         raise ValueError("acknowledgement_key and purchased_items are required")
-    with _connect() as connection:
-        shopping_list = connection.execute("SELECT * FROM shopping_lists WHERE id = ?", (shopping_list_id,)).fetchone()
-        if shopping_list is None:
-            raise ValueError(f"No shopping list found for id {shopping_list_id}")
-        if shopping_list["status"] == "purchased":
-            return {"list": dict(shopping_list), "replayed": True}
-        for item in purchased_items:
-            if float(item.get("actual_quantity", 0)) < 0:
-                raise ValueError("actual quantities cannot be negative")
-        for item in purchased_items:
+    normalized_purchases = []
+    for item in purchased_items:
+        try:
             item_id = int(item["shopping_item_id"])
             quantity = float(item["actual_quantity"])
-            row = connection.execute("SELECT * FROM shopping_items WHERE id = ? AND shopping_list_id = ?", (item_id, shopping_list_id)).fetchone()
-            if row is None:
-                raise ValueError(f"No shopping item found for id {item_id}")
-            connection.execute("UPDATE shopping_items SET actual_quantity = ?, status = 'purchased' WHERE id = ?", (quantity, item_id))
-            if quantity == 0:
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("each purchased item requires shopping_item_id and a numeric actual_quantity") from error
+        if quantity < 0:
+            raise ValueError("actual quantities cannot be negative")
+        normalized_purchases.append((item_id, quantity))
+
+    with _connect() as connection:
+        applied_ids: list[int] = []
+        already_applied_ids: list[int] = []
+        for item_id, quantity in normalized_purchases:
+            idempotency_key = f"{acknowledgement_key}:{item_id}"
+            if connection.execute("SELECT 1 FROM inventory_transactions WHERE idempotency_key = ?", (idempotency_key,)).fetchone():
+                already_applied_ids.append(item_id)
                 continue
-            inventory = connection.execute("SELECT * FROM inventory WHERE item_name = ?", (row["item_name"],)).fetchone()
-            if inventory is None:
-                cursor = connection.execute("INSERT INTO inventory (item_name, category, quantity, unit) VALUES (?, 'Pantry', ?, ?)", (row["item_name"], quantity, row["unit"]))
-                inventory_id, before = cursor.lastrowid, 0
-            else:
-                inventory_id, before = inventory["id"], inventory["quantity"]
-                connection.execute("UPDATE inventory SET quantity = quantity + ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (quantity, inventory_id))
-            connection.execute("INSERT INTO inventory_transactions (inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (inventory_id, quantity, before, before + quantity, "Shopping purchase acknowledged", "shopping_list", shopping_list_id, f"{acknowledgement_key}:{item_id}"))
-        connection.execute("UPDATE shopping_lists SET status = 'purchased', acknowledgement_key = ?, acknowledged_at = CURRENT_TIMESTAMP WHERE id = ?", (acknowledgement_key, shopping_list_id))
-        return {"list": _record_in_connection(connection, "shopping_lists", shopping_list_id), "replayed": False}
+            row = connection.execute("SELECT * FROM shopping_items WHERE id = ?", (item_id,)).fetchone()
+            if row is None:
+                # Already cleared under a different acknowledgement_key (or never
+                # existed) - nothing left here to apply.
+                continue
+            if quantity > 0:
+                inventory = connection.execute("SELECT * FROM inventory WHERE item_name = ?", (row["item_name"],)).fetchone()
+                if inventory is None:
+                    cursor = connection.execute("INSERT INTO inventory (item_name, category, quantity, unit) VALUES (?, 'Pantry', ?, ?)", (row["item_name"], quantity, row["unit"]))
+                    inventory_id, before = cursor.lastrowid, 0
+                else:
+                    inventory_id, before = inventory["id"], inventory["quantity"]
+                    connection.execute("UPDATE inventory SET quantity = quantity + ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?", (quantity, inventory_id))
+                connection.execute(
+                    "INSERT INTO inventory_transactions (inventory_id, quantity_change, quantity_before, quantity_after, reason, source_type, source_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (inventory_id, quantity, before, before + quantity, "Shopping purchase acknowledged", "shopping_item", item_id, idempotency_key),
+                )
+            connection.execute("DELETE FROM shopping_items WHERE id = ?", (item_id,))
+            applied_ids.append(item_id)
+        replayed = not applied_ids and bool(already_applied_ids)
+        return {"replayed": replayed, "cleared_item_ids": applied_ids}
+
+
+def get_user_profile() -> dict[str, Any]:
+    """Read the single household profile row (name, contact email, preferences)."""
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM user_profile WHERE id = 1").fetchone()
+    return dict(row) if row is not None else {}
+
+
+def update_user_profile(
+    name: str | None = None,
+    email: str | None = None,
+    cc_emails: str | None = None,
+    notes: str | None = None,
+    notify_on_task_creation: bool | None = None,
+) -> dict[str, Any]:
+    """Patch the household profile. Only the fields passed (non-None) are changed.
+
+    `cc_emails` is a free-form string of extra addresses (comma/semicolon/newline
+    separated) copied on task-alert emails. `favorite_recipes` is not patchable here -
+    it's maintained automatically from weekly-menu ratings.
+    """
+    if email is not None and email.strip() and "@" not in email:
+        raise ValueError("email must be a valid address")
+    assignments: list[str] = []
+    values: list[Any] = []
+    for column, value in (("name", name), ("email", email), ("cc_emails", cc_emails), ("notes", notes)):
+        if value is not None:
+            assignments.append(f"{column} = ?")
+            values.append(str(value).strip())
+    if notify_on_task_creation is not None:
+        assignments.append("notify_on_task_creation = ?")
+        values.append(int(bool(notify_on_task_creation)))
+    if not assignments:
+        return get_user_profile()
+    with _connect() as connection:
+        connection.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)")
+        connection.execute(
+            f"UPDATE user_profile SET {', '.join(assignments)}, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+            values,
+        )
+    return get_user_profile()
+
+
+@mcp.tool()
+def get_household_preferences() -> dict[str, Any]:
+    """Planning context set by the household on the profile screen.
+
+    Returns the chef's free-text note and the household's most recently top-rated
+    dishes (up to 10, newest first, each with its star rating and when it was rated).
+    Consult this before building or revising the weekly menu so the plan leans on
+    dishes the family actually enjoyed lately - repeat or riff on them wherever the
+    dietary rules allow.
+    """
+    profile = get_user_profile()
+    try:
+        favorites = json.loads(profile.get("favorite_recipes") or "[]")
+        if not isinstance(favorites, list):
+            favorites = []
+    except (json.JSONDecodeError, TypeError):
+        favorites = []
+    chef_note = profile.get("notes", "") or ""
+    favorite_recipes = [
+        {
+            "dish_name": entry.get("dish_name", ""),
+            "rating": entry.get("rating"),
+            "rated_at": entry.get("rated_at"),
+        }
+        for entry in favorites
+        if entry.get("dish_name")
+    ]
+    if favorite_recipes or chef_note.strip():
+        guidance = "Weight these favourites and the note when planning, within the dietary rules."
+    else:
+        guidance = (
+            "No saved favourites or chef note yet - this is optional context, not a blocker. "
+            "Plan the week from current inventory, the dietary and macro rules, and everyday variety."
+        )
+    return {
+        "chef_note": chef_note,
+        "favorite_recipes": favorite_recipes,
+        "has_preferences": bool(favorite_recipes or chef_note.strip()),
+        "guidance": guidance,
+    }
+
+
+# --- Email notifications: moved out of dbmcp --------------------------------------
+# The three send_*_email tools, their Pydantic payload models, the SMTP transport and
+# the body builders now live in agents/app/email/ (schemas / smtp /
+# render / backfill / tools). The agent is the only process that sends mail, and none
+# of it needed the database directly - it back-fills the saved menu / shopping items
+# over the dbmcp REST API instead. dbmcp keeps no SMTP config.
 
 
 class InventoryAddRequest(BaseModel):
@@ -481,8 +1072,8 @@ class MenuItemRequest(BaseModel):
     dish_name: str = Field(min_length=1)
     is_kid_friendly: bool
     macros: str
-    ingredients: str
-    full_recipe: str = ""
+    ingredients: list[str] = Field(min_length=1)
+    full_recipe: list[str] = Field(default_factory=list)
 
     @field_validator("day_of_week")
     @classmethod
@@ -499,9 +1090,8 @@ class PrepScheduleRequest(BaseModel):
     trigger_day: str
     trigger_time: str = Field(min_length=1)
     task_type: str = Field(min_length=1)
-    detailed_instructions: str = Field(min_length=1)
-    ingredients_used: str = ""
-    ingredients_created: str = ""
+    detailed_instructions: list[str] = Field(min_length=1)
+    ingredients_used: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("trigger_day")
     @classmethod
@@ -514,9 +1104,7 @@ class PrepCompletionRequest(BaseModel):
     human_notes: str = ""
 
 
-class PrepAcknowledgementRequest(BaseModel):
-    acknowledgement_key: str = Field(min_length=1, max_length=200)
-    consumed_items: list[dict[str, Any]] = Field(min_length=1)
+class PrepCancellationRequest(BaseModel):
     human_notes: str = ""
 
 
@@ -526,11 +1114,16 @@ class ShoppingItemRequest(BaseModel):
     unit: str = Field(min_length=1)
 
 
-class ShoppingListRequest(BaseModel):
+class ShoppingItemsRequest(BaseModel):
     items: list[ShoppingItemRequest] = Field(min_length=1)
 
 
-class ShoppingPurchaseRequest(BaseModel):
+class ShoppingItemEditRequest(BaseModel):
+    proposed_quantity: float | None = Field(default=None, gt=0)
+    unit: str | None = Field(default=None, min_length=1)
+
+
+class ShoppingAcknowledgementRequest(BaseModel):
     acknowledgement_key: str = Field(min_length=1, max_length=200)
     purchased_items: list[dict[str, Any]] = Field(min_length=1)
 
@@ -543,16 +1136,28 @@ class AgentRunRequest(BaseModel):
     error: str = ""
 
 
-class MenuPolicyRequest(BaseModel):
-    menu_items: list[dict[str, Any]] = Field(min_length=1)
-
-
-class MenuPlanRequest(BaseModel):
-    menu_items: list[dict[str, Any]] = Field(min_length=5)
+# --- soft-deleted: no caller --------------------------------------------------
+# MenuPolicyRequest / MenuPlanRequest backed POST /api/weekly-menu/validate and
+# POST /api/weekly-menu/plan, neither of which anything calls. The
+# validate_weekly_menu_policy MCP tool (used by the weekly_menu job) stays.
+#
+# class MenuPolicyRequest(BaseModel):
+#     menu_items: list[dict[str, Any]] = Field(min_length=1)
+#
+# class MenuPlanRequest(BaseModel):
+#     menu_items: list[dict[str, Any]] = Field(min_length=5)
 
 
 class ChatSessionRequest(BaseModel):
     messages: list[dict[str, Any]]
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    cc_emails: str | None = None
+    notes: str | None = None
+    notify_on_task_creation: bool | None = None
 
 
 def _tool_error(error: ValueError) -> HTTPException:
@@ -588,9 +1193,26 @@ def dashboard() -> dict[str, Any]:
     with _connect() as connection:
         return {
             "inventory": [dict(row) for row in connection.execute("SELECT * FROM inventory ORDER BY category, item_name")],
-            "menu": [dict(row) for row in connection.execute("SELECT * FROM weekly_menu ORDER BY CASE day_of_week WHEN 'monday' THEN 1 WHEN 'tuesday' THEN 2 WHEN 'wednesday' THEN 3 WHEN 'thursday' THEN 4 WHEN 'friday' THEN 5 ELSE 6 END, id")],
-            "tasks": [dict(row) for row in connection.execute("SELECT * FROM detailed_prep_schedule ORDER BY is_completed, id")],
-                "shopping_lists": [{**dict(row), "items": [dict(item) for item in connection.execute("SELECT * FROM shopping_items WHERE shopping_list_id = ? ORDER BY id", (row["id"],))]} for row in connection.execute("SELECT * FROM shopping_lists ORDER BY id DESC")],
+            "menu": [dict(row) for row in connection.execute("SELECT * FROM weekly_menu ORDER BY CASE day_of_week WHEN 'monday' THEN 1 WHEN 'tuesday' THEN 2 WHEN 'wednesday' THEN 3 WHEN 'thursday' THEN 4 WHEN 'friday' THEN 5 WHEN 'saturday' THEN 6 WHEN 'sunday' THEN 7 ELSE 8 END, CASE meal_type WHEN 'breakfast' THEN 1 WHEN 'lunch' THEN 2 WHEN 'snack' THEN 3 WHEN 'dinner' THEN 4 ELSE 5 END, id")],
+            "tasks": [dict(row) for row in connection.execute("SELECT * FROM detailed_prep_schedule WHERE status <> 'cancelled' AND (is_completed = 0 OR id IN (SELECT id FROM detailed_prep_schedule WHERE is_completed = 1 AND status <> 'cancelled' ORDER BY id DESC LIMIT 10)) ORDER BY is_completed, id")],
+            "shopping_items": [dict(row) for row in connection.execute("SELECT * FROM shopping_items ORDER BY item_name")],
+            "consumption": [dict(row) for row in connection.execute(
+                """
+                SELECT i.id AS inventory_id, i.item_name, i.unit,
+                       ROUND(SUM(-t.quantity_change), 3) AS quantity_consumed,
+                       COUNT(*) AS transaction_count,
+                       MAX(t.created_at) AS last_consumed_at
+                FROM inventory_transactions t
+                JOIN inventory i ON i.id = t.inventory_id
+                WHERE t.quantity_change < 0
+                  AND t.created_at >= datetime('now', '-7 days')
+                GROUP BY t.inventory_id
+                ORDER BY quantity_consumed DESC, i.item_name
+                """
+            )],
+            "profile": (lambda row: dict(row) if row is not None else {})(
+                connection.execute("SELECT * FROM user_profile WHERE id = 1").fetchone()
+            ),
         }
 
 
@@ -650,26 +1272,52 @@ def api_capture_completion(prep_schedule_id: int, request: PrepCompletionRequest
         raise _tool_error(error) from error
 
 
-@app.post("/api/prep-schedule/{prep_schedule_id}/acknowledge")
-def api_acknowledge_prep(prep_schedule_id: int, request: PrepAcknowledgementRequest) -> dict[str, Any]:
+@app.post("/api/prep-schedule/{prep_schedule_id}/cancel")
+def api_cancel_prep(prep_schedule_id: int, request: PrepCancellationRequest) -> dict[str, Any]:
     try:
-        return acknowledge_prep_schedule(prep_schedule_id, **request.model_dump())
+        return cancel_prep_schedule(prep_schedule_id, **request.model_dump())
     except ValueError as error:
         raise _tool_error(error) from error
 
 
-@app.post("/api/shopping-lists")
-def api_create_shopping_list(request: ShoppingListRequest) -> dict[str, Any]:
+@app.get("/api/shopping-items")
+def api_get_shopping_items() -> list[dict[str, Any]]:
+    return get_shopping_items()
+
+
+@app.post("/api/shopping-items")
+def api_add_shopping_items(request: ShoppingItemsRequest) -> list[dict[str, Any]]:
     try:
-        return create_shopping_list([item.model_dump() for item in request.items])
+        return add_shopping_items([item.model_dump() for item in request.items])
     except ValueError as error:
         raise _tool_error(error) from error
 
 
-@app.post("/api/shopping-lists/{shopping_list_id}/acknowledge")
-def api_acknowledge_shopping(shopping_list_id: int, request: ShoppingPurchaseRequest) -> dict[str, Any]:
+@app.patch("/api/shopping-items/{shopping_item_id}")
+def api_edit_shopping_item(shopping_item_id: int, request: ShoppingItemEditRequest) -> dict[str, Any]:
     try:
-        return acknowledge_shopping_list(shopping_list_id, **request.model_dump())
+        return edit_shopping_item(shopping_item_id, **request.model_dump())
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@app.delete("/api/shopping-items/{shopping_item_id}")
+def api_delete_shopping_item(shopping_item_id: int) -> dict[str, Any]:
+    try:
+        return delete_shopping_item(shopping_item_id)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@app.post("/api/shopping-items/clear")
+def api_clear_shopping_items() -> dict[str, Any]:
+    return clear_shopping_items()
+
+
+@app.post("/api/shopping-items/acknowledge")
+def api_acknowledge_shopping(request: ShoppingAcknowledgementRequest) -> dict[str, Any]:
+    try:
+        return acknowledge_shopping_items(**request.model_dump())
     except ValueError as error:
         raise _tool_error(error) from error
 
@@ -690,17 +1338,55 @@ def api_agent_runs() -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT 100")]
 
 
-@app.post("/api/weekly-menu/validate")
-def api_validate_menu(request: MenuPolicyRequest) -> dict[str, Any]:
-    return validate_weekly_menu_policy(request.menu_items)
+# --- soft-deleted: no caller --------------------------------------------------
+# Nothing calls POST /api/weekly-menu/validate or POST /api/weekly-menu/plan
+# (chatui has no proxy for either; the agent works slot-by-slot over MCP).
+#
+# @app.post("/api/weekly-menu/validate")
+# def api_validate_menu(request: MenuPolicyRequest) -> dict[str, Any]:
+#     return validate_weekly_menu_policy(request.menu_items)
+#
+# @app.post("/api/weekly-menu/plan")
+# def api_add_menu_plan(request: MenuPlanRequest) -> dict[str, Any]:
+#     try:
+#         return add_weekly_menu_plan(request.menu_items)
+#     except ValueError as error:
+#         raise _tool_error(error) from error
 
 
-@app.post("/api/weekly-menu/plan")
-def api_add_menu_plan(request: MenuPlanRequest) -> dict[str, Any]:
+@app.get("/api/profile")
+def api_get_profile() -> dict[str, Any]:
+    return get_user_profile()
+
+
+@app.put("/api/profile")
+def api_update_profile(request: ProfileUpdateRequest) -> dict[str, Any]:
     try:
-        return add_weekly_menu_plan(request.menu_items)
+        return update_user_profile(**request.model_dump())
     except ValueError as error:
         raise _tool_error(error) from error
+
+
+# Email notification routes removed - see agents/app/email/. The agent
+# sends prep-plan / weekly-menu / shopping-list mail itself via local tools.
+
+
+@app.get("/api/chat-sessions")
+def api_list_chat_sessions(limit: int = 5) -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT session_id, messages_json, updated_at FROM chat_sessions ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    sessions = []
+    for row in rows:
+        messages = json.loads(row["messages_json"])
+        preview = next(
+            (message.get("data", {}).get("content", "") for message in messages if message.get("type") == "human"),
+            "",
+        )
+        sessions.append({"session_id": row["session_id"], "updated_at": row["updated_at"], "preview": preview[:120]})
+    return sessions
 
 
 @app.get("/api/chat-sessions/{session_id}")

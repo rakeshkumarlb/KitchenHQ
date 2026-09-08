@@ -19,13 +19,22 @@ const request = async (path, options = {}) => {
 
 export const kitchenApi = {
   getDashboard: () => request('/dashboard'),
+  getProfile: () => request('/profile'),
+  updateProfile: (profile) => request('/profile', { method: 'PUT', body: JSON.stringify(profile) }),
   chat: (message, sessionId) => request('/chat', { method: 'POST', body: JSON.stringify({ message, ...(sessionId ? { session_id: sessionId } : {}) }) }),
-  validateMenu: (menuItems) => request('/weekly-menu/validate', { method: 'POST', body: JSON.stringify({ menu_items: menuItems }) }),
-  saveMenuPlan: (menuItems) => request('/weekly-menu/plan', { method: 'POST', body: JSON.stringify({ menu_items: menuItems }) }),
-  createShoppingList: (items) => request('/shopping-lists', { method: 'POST', body: JSON.stringify({ items }) }),
-  acknowledgeShopping: (id, acknowledgementKey, purchasedItems) => request(`/shopping-lists/${id}/acknowledge`, { method: 'POST', body: JSON.stringify({ acknowledgement_key: acknowledgementKey, purchased_items: purchasedItems }) }),
-  adjustInventory: (id, quantityChange) => request(`/inventory/${id}`, { method: 'PATCH', body: JSON.stringify({ quantity_change: quantityChange }) }),
-  discardInventory: (id, quantity, reason) => request(`/inventory/${id}/discard`, { method: 'POST', body: JSON.stringify({ quantity, reason }) }),
+  listChatSessions: () => request('/chat-sessions'),
+  getChatSession: (sessionId) => request(`/chat-sessions/${sessionId}`),
+  // soft-deleted: no caller, and chatui/app.py never proxied these. The dbmcp
+  // routes POST /api/weekly-menu/{validate,plan} are commented out too.
+  // validateMenu: (menuItems) => request('/weekly-menu/validate', { method: 'POST', body: JSON.stringify({ menu_items: menuItems }) }),
+  // saveMenuPlan: (menuItems) => request('/weekly-menu/plan', { method: 'POST', body: JSON.stringify({ menu_items: menuItems }) }),
+  addShoppingItems: (items) => request('/shopping-items', { method: 'POST', body: JSON.stringify({ items }) }),
+  deleteShoppingItem: (id) => request(`/shopping-items/${id}`, { method: 'DELETE' }),
+  acknowledgeShopping: (acknowledgementKey, purchasedItems) => request('/shopping-items/acknowledge', { method: 'POST', body: JSON.stringify({ acknowledgement_key: acknowledgementKey, purchased_items: purchasedItems }) }),
   rateMenuItem: (id, kidRating, humanFeedback) => request(`/weekly-menu/${id}/rating`, { method: 'POST', body: JSON.stringify({ kid_rating: kidRating, human_feedback: humanFeedback }) }),
   updateTask: (id, isCompleted, humanNotes = '') => request(`/prep-schedule/${id}/completion`, { method: 'PATCH', body: JSON.stringify({ is_completed: isCompleted, human_notes: humanNotes }) }),
+  cancelTask: (id, humanNotes = '') => request(`/prep-schedule/${id}/cancel`, { method: 'POST', body: JSON.stringify({ human_notes: humanNotes }) }),
+  listAutomationJobs: () => request('/automations/jobs'),
+  listAutomationRuns: () => request('/automations/runs'),
+  invokeAutomation: (jobName) => request(`/automations/invoke/${jobName}`, { method: 'POST' }),
 };
