@@ -14,37 +14,45 @@ services:
     volumes:
       - "${KITCHEN_DB_HOST_PATH:-./data}:/data"
 
+  agent-api:
+    build:
+      context: ./agents
+      dockerfile: Dockerfile
+    container_name: kitchenhq-agent-api
+    depends_on:
+      - dbmcp
+    env_file:
+      - path: ./agents/.env
+        required: false
+    environment:
+      MCP_URL: http://dbmcp:18000/mcp
+      MCP_TRANSPORT: streamable_http
+      DB_API_URL: http://dbmcp:18000
+      TZ: ${KITCHEN_TIMEZONE:-Asia/Kolkata}
+      KITCHENHQ_API_KEY: ${KITCHENHQ_API_KEY:?KITCHENHQ_API_KEY must be set}
+      # Optional: set SMTP_HOST (and creds) so the agents can email the profile address
+      # via the send_*_email tools (prep plan / weekly menu / shopping list). No
+      # automatic send. Unset = those tools report {"sent": false}, jobs unaffected.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_SSL: ${SMTP_SSL:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-}
+    ports:
+      - "8090:8090"
+
   chatui:
     build:
-      context: .
-      dockerfile: ./chatui/Dockerfile
+      context: ./chatui
     container_name: kitchenhq-chatui
     depends_on:
       - dbmcp
-    env_file:
-      - path: ./executivechef_agent/.env
-        required: false
+      - agent-api
     environment:
-      MCP_URL: http://dbmcp:18000/mcp
-      MCP_TRANSPORT: streamable_http
+      DB_API_URL: http://dbmcp:18000
+      AGENT_API_URL: http://agent-api:8090
       KITCHENHQ_API_KEY: ${KITCHENHQ_API_KEY:?KITCHENHQ_API_KEY must be set}
     ports:
       - "8080:8080"
-
-  agent-worker:
-    build:
-      context: ./executivechef_agent
-      dockerfile: Dockerfile
-    container_name: kitchenhq-agent-worker
-    depends_on:
-      - dbmcp
-    env_file:
-      - path: ./executivechef_agent/.env
-        required: false
-    environment:
-      MCP_URL: http://dbmcp:18000/mcp
-      MCP_TRANSPORT: streamable_http
-      TZ: ${KITCHEN_TIMEZONE:-Asia/Kolkata}
-      KITCHENHQ_API_KEY: ${KITCHENHQ_API_KEY:?KITCHENHQ_API_KEY must be set}
-    command: ["python", "worker.py"]
-

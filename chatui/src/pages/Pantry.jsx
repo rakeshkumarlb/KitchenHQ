@@ -1,25 +1,97 @@
 import { useState } from 'react';
-import { Check, Minus, Plus, ShoppingCart, Sparkles, Trash2 } from 'lucide-react';
+import { Check, LoaderCircle, Plus, RefreshCw, ShoppingCart, Sparkles, TrendingDown, X } from 'lucide-react';
 
-export default function Pantry({ data, onAdjust, onDiscard, onSuggestShopping, onAcknowledgeShopping }) {
-  const openList = data.shopping_lists?.find((list) => list.status !== 'purchased');
+export default function Pantry({ data, onAcknowledgeShopping, onAddToShopping, onDeleteShoppingItem, onInvokePantryManager, onRefresh }) {
+  const shoppingItems = data.shopping_items || [];
+  const consumption = data.consumption || [];
+  const consumptionPeak = consumption.reduce((max, row) => Math.max(max, row.quantity_consumed), 0);
   const [quantities, setQuantities] = useState({});
-  const [selectedSuggestions, setSelectedSuggestions] = useState([]);
-  const shoppingItems = openList?.items || [];
-  const suggestedItems = data.inventory.filter((item) => item.quantity <= item.minimum_threshold && !shoppingItems.some((shoppingItem) => shoppingItem.item_name.toLowerCase() === item.item_name.toLowerCase()));
-  const categories = [...new Set(data.inventory.map((item) => item.category))];
+  const [refreshing, setRefreshing] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [form, setForm] = useState({ item_name: '', proposed_quantity: '', unit: '' });
+
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try { await onRefresh?.(); } finally { setRefreshing(false); }
+  };
+  const askPantryManager = async () => {
+    if (asking) return;
+    setAsking(true);
+    try { await onInvokePantryManager?.(); } catch { /* error surfaces in the page banner */ } finally { setAsking(false); }
+  };
   const updateQuantity = (id, value) => setQuantities((current) => ({ ...current, [id]: value }));
-  const toggleSuggestion = (item) => setSelectedSuggestions((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id]);
-  const proposedQuantity = (item) => Math.max(item.minimum_threshold * 2 - item.quantity, 1);
-  const createSuggestion = () => {
-    const items = suggestedItems.filter((item) => selectedSuggestions.includes(item.id)).map((item) => ({ item_name: item.item_name, proposed_quantity: proposedQuantity(item), unit: item.unit }));
-    if (items.length) onSuggestShopping(items);
+  const formQuantity = Number(form.proposed_quantity);
+  const canSubmit = form.item_name.trim() && formQuantity > 0;
+  const submitItem = (event) => {
+    event.preventDefault();
+    if (!canSubmit) return;
+    onAddToShopping([{ item_name: form.item_name.trim(), proposed_quantity: formQuantity, unit: form.unit.trim() || 'pcs' }]);
+    setForm({ item_name: '', proposed_quantity: '', unit: '' });
   };
 
+  const categories = [...new Set(data.inventory.map((item) => item.category))];
+
   return <div className="page-content">
-    <div className="page-lead"><div><p className="eyebrow">The fresh shelf</p><h2>Pantry, <em>in hand.</em></h2><p>Know what you have, use what is freshest, and keep waste visible.</p></div><div className="stock-total soft-inset"><strong>{data.inventory.length}</strong><span>items in stock</span></div></div>
-    {!openList && <section className="shopping-panel suggestion-panel soft-outset"><div className="section-heading compact"><h3><Sparkles size={16} /> Shopping suggestions</h3><span>{suggestedItems.length} low-stock items</span></div>{suggestedItems.length ? <><p className="shopping-intro">Build a proposal from ingredients that need attention.</p>{suggestedItems.map((item) => <label className="shopping-suggestion" key={item.id}><input type="checkbox" checked={selectedSuggestions.includes(item.id)} onChange={() => toggleSuggestion(item)} /><span><b>{item.item_name}</b><small>{item.quantity} {item.unit} left · threshold {item.minimum_threshold}</small></span><strong>{proposedQuantity(item)} {item.unit}</strong></label>)}<button className="shopping-confirm" disabled={!selectedSuggestions.length} onClick={createSuggestion}><ShoppingCart size={15} /> Create shopping list</button></> : <p className="shopping-empty">There are no items in your shopping list suggestions right now.</p>}</section>}
-    {openList && <section className="shopping-panel soft-outset"><div className="section-heading compact"><h3><ShoppingCart size={16} /> Shopping list</h3><span>Review actual purchases</span></div>{shoppingItems.length ? <>{shoppingItems.map((item) => <div className="shopping-row" key={item.id}><div><b>{item.item_name}</b><small>Suggested {item.proposed_quantity} {item.unit}</small></div><input type="number" min="0" step="any" value={quantities[item.id] ?? item.proposed_quantity} onChange={(event) => updateQuantity(item.id, event.target.value)} aria-label={`Purchased quantity for ${item.item_name}`} /><span>{item.unit}</span></div>)}<button className="shopping-confirm" onClick={() => onAcknowledgeShopping(openList.id, shoppingItems.map((item) => ({ shopping_item_id: item.id, actual_quantity: Number(quantities[item.id] ?? item.proposed_quantity) })))}><Check size={15} /> Acknowledge purchase</button></> : <p className="shopping-empty">There are no items in your shopping list yet.</p>}</section>}
-    {categories.map((category) => <section className="table-section" key={category}><div className="section-heading compact"><h3>{category}</h3><span>{data.inventory.filter((item) => item.category === category).length} items</span></div><div className="pantry-list soft-outset">{data.inventory.filter((item) => item.category === category).map((item) => { const low = item.quantity <= item.minimum_threshold; return <div className="pantry-row" key={item.id}><div className="ingredient-mark">{item.item_name.slice(0, 1)}</div><div className="ingredient-name"><b>{item.item_name}</b><small>Updated just now</small></div><div className={`stock-level ${low ? 'low' : ''}`}><strong>{item.quantity}</strong><span>{item.unit}{low && ' · low stock'}</span></div><div className="quantity-actions"><button onClick={() => onAdjust(item.id, -1)} aria-label={`Decrease ${item.item_name}`}><Minus size={15} /></button><button onClick={() => onAdjust(item.id, 1)} aria-label={`Increase ${item.item_name}`}><Plus size={15} /></button><button className="discard-button" onClick={() => onDiscard(item)} aria-label={`Discard ${item.item_name}`}><Trash2 size={15} /></button></div></div>; })}</div></section>)}
+    <div className="page-lead">
+      <div><p className="eyebrow">The fresh shelf</p><h2>Pantry, <em>in hand.</em></h2><p>Stock only ever changes when a shopping list is acknowledged. Ask the Pantry Manager or add items yourself, then confirm what was bought.</p></div>
+      <div className="page-lead-actions">
+        <button className="secondary-button" onClick={refresh} disabled={refreshing}><RefreshCw className={refreshing ? 'spin' : undefined} size={16} /> {refreshing ? 'Refreshing...' : 'Refresh'}</button>
+        <div className="stock-total soft-inset"><strong>{data.inventory.length}</strong><span>items in stock</span></div>
+      </div>
+    </div>
+
+    <section className="shopping-panel soft-outset">
+      <div className="section-heading compact"><h3><Sparkles size={16} /> Pantry Manager suggestions</h3><span>Agent-built proposal</span></div>
+      <p className="shopping-intro">The Pantry Manager checks current stock against the upcoming menu and drafts a shopping list. It never changes inventory on its own.</p>
+      <button className="shopping-confirm" onClick={askPantryManager} disabled={asking}>{asking ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} {asking ? 'Asking the Pantry Manager...' : 'Ask the Pantry Manager'}</button>
+    </section>
+
+    <section className="shopping-panel soft-outset">
+      <div className="section-heading compact"><h3><Plus size={16} /> Add to shopping list</h3><span>Merges into what's already pending</span></div>
+      <form className="shopping-add" onSubmit={submitItem}>
+        <input type="text" placeholder="Item name" value={form.item_name} onChange={(event) => setForm((current) => ({ ...current, item_name: event.target.value }))} aria-label="Item name" />
+        <input type="number" min="0" step="any" placeholder="Qty" value={form.proposed_quantity} onChange={(event) => setForm((current) => ({ ...current, proposed_quantity: event.target.value }))} aria-label="Quantity" />
+        <input type="text" placeholder="Unit" value={form.unit} onChange={(event) => setForm((current) => ({ ...current, unit: event.target.value }))} aria-label="Unit" />
+        <button type="submit" className="shopping-confirm" disabled={!canSubmit}><Plus size={15} /> Add</button>
+      </form>
+    </section>
+
+    <section className="shopping-panel soft-outset">
+      <div className="section-heading compact"><h3><ShoppingCart size={16} /> Shopping list</h3><span>Enter what was actually bought</span></div>
+      {shoppingItems.length ? <>
+        {shoppingItems.map((item) => <div className="shopping-row" key={item.id}>
+          <div><b>{item.item_name}</b><small>Suggested {item.proposed_quantity} {item.unit}</small></div>
+          <input type="number" min="0" step="any" value={quantities[item.id] ?? item.proposed_quantity} onChange={(event) => updateQuantity(item.id, event.target.value)} aria-label={`Purchased quantity for ${item.item_name}`} />
+          <span>{item.unit}</span>
+          <button className="task-cancel" onClick={() => onDeleteShoppingItem(item.id)} aria-label={`Remove ${item.item_name} from the list`} title="Not needed - remove from list"><X size={15} /></button>
+        </div>)}
+        <button className="shopping-confirm" onClick={() => onAcknowledgeShopping(shoppingItems.map((item) => ({ shopping_item_id: item.id, actual_quantity: Number(quantities[item.id] ?? item.proposed_quantity) })))}><Check size={15} /> Acknowledge purchase</button>
+      </> : <p className="shopping-empty">The shopping list is empty. Add an item above, or ask the Pantry Manager.</p>}
+    </section>
+
+    <section className="table-section">
+      <div className="section-heading compact"><h3><TrendingDown size={16} /> This week's consumption</h3><span>Last 7 days</span></div>
+      <div className="pantry-list soft-outset">
+        {consumption.length ? consumption.map((row) => <div className="consumption-row" key={row.inventory_id}>
+          <div className="ingredient-name"><b>{row.item_name}</b><small>{row.transaction_count} prep {row.transaction_count === 1 ? 'deduction' : 'deductions'}</small></div>
+          <div className="consumption-bar"><span style={{ width: `${consumptionPeak ? Math.max(Math.round((row.quantity_consumed / consumptionPeak) * 100), 4) : 0}%` }} /></div>
+          <div className="stock-level"><strong>{row.quantity_consumed}</strong><span>{row.unit}</span></div>
+        </div>) : <div className="consumption-empty">Nothing was consumed from the pantry in the last 7 days.</div>}
+      </div>
+    </section>
+
+    {categories.map((category) => <section className="table-section" key={category}>
+      <div className="section-heading compact"><h3>{category}</h3><span>{data.inventory.filter((item) => item.category === category).length} items</span></div>
+      <div className="pantry-list soft-outset">
+        {data.inventory.filter((item) => item.category === category).map((item) => {
+          const low = item.quantity <= item.minimum_threshold;
+          return <div className="pantry-row read-only" key={item.id}>
+            <div className="ingredient-name"><b>{item.item_name}</b><small>Reorder threshold {item.minimum_threshold} {item.unit}</small></div>
+            <div className={`stock-level ${low ? 'low' : ''}`}><strong>{item.quantity}</strong><span>{item.unit}{low && ' · low stock'}</span></div>
+          </div>;
+        })}
+      </div>
+    </section>)}
   </div>;
 }
