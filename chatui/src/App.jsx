@@ -30,6 +30,14 @@ export default function App() {
   const [data, setData] = useState(fallback);
   const [error, setError] = useState('');
   const [mobileNav, setMobileNav] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem('kitchenhq-sidebar-collapsed') === '1'; } catch { return false; }
+  });
+  const toggleSidebar = () => setSidebarCollapsed((current) => {
+    const next = !current;
+    try { localStorage.setItem('kitchenhq-sidebar-collapsed', next ? '1' : '0'); } catch { /* storage unavailable */ }
+    return next;
+  });
   const load = async () => {
     try {
       setError('');
@@ -57,5 +65,5 @@ export default function App() {
   const [rawTitle, eyebrow] = pageMeta[page];
   const title = page === 'dashboard' && firstName ? `Good morning, ${firstName}` : rawTitle;
   const content = { dashboard: <Dashboard data={data} navigate={setPage} />, pantry: <Pantry data={data} onAddToShopping={addToShopping} onDeleteShoppingItem={deleteShoppingItem} onInvokePantryManager={invokePantryManager} onAcknowledgeShopping={acknowledgeShopping} onRefresh={load} />, menu: <WeeklyMenu data={data} onRefresh={load} />, tasks: <TaskList data={data} onToggle={toggle} onCancel={cancelTask} onRefresh={load} />, chat: <Chat />, automations: <Automations />, profile: <Profile data={data} onSave={saveProfile} onAddMember={addMember} onUpdateMember={updateMember} onDeleteMember={deleteMember} /> }[page];
-  return <div className="app-shell"><Sidebar page={page} onNavigate={(next) => { setPage(next); setMobileNav(false); }} open={mobileNav} /><main className="main"><PageHeader title={title} eyebrow={eyebrow} profileName={data.profile?.name} onRefresh={load} onMenu={() => setMobileNav(!mobileNav)} />{error && <div className="error-banner">Could not refresh kitchen data: {error}</div>}{content}</main></div>;
+  return <div className="app-shell"><Sidebar page={page} onNavigate={(next) => { setPage(next); setMobileNav(false); }} open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} /><main className="main"><PageHeader title={title} eyebrow={eyebrow} profileName={data.profile?.name} onRefresh={load} onMenu={() => setMobileNav(!mobileNav)} />{error && <div className="error-banner">Could not refresh kitchen data: {error}</div>}{content}</main></div>;
 }

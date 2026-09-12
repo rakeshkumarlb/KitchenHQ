@@ -1,4 +1,4 @@
-import { ChefHat, ClipboardCheck, LayoutDashboard, MessageCircle, Package, Soup, UserRound, Workflow } from 'lucide-react';
+import { ChefHat, ClipboardCheck, LayoutDashboard, MessageCircle, Package, PanelLeftClose, PanelLeftOpen, Soup, UserRound, Workflow } from 'lucide-react';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -10,13 +10,16 @@ const navItems = [
   { id: 'profile', label: 'Profile', icon: UserRound },
 ];
 
-export default function Sidebar({ page, onNavigate, open }) {
-  return <aside className={`sidebar ${open ? 'is-open' : ''}`}>
-    <div className="logo"><span className="logo-mark"><ChefHat size={19} /></span><span>KITCHEN<span className="logo-light">HQ</span></span></div>
-    <div className="workspace-card soft-inset"><span className="avatar">EC</span><span><b>Executive kitchen</b><small>Home workspace</small></span><span className="online-dot" /></div>
+export default function Sidebar({ page, onNavigate, open, collapsed, onToggleCollapse }) {
+  return <aside className={`sidebar ${open ? 'is-open' : ''} ${collapsed ? 'is-collapsed' : ''}`}>
+    <div className="sidebar-top">
+      <div className="logo"><span className="logo-mark"><ChefHat size={19} /></span><span className="logo-text">KITCHEN<span className="logo-light">HQ</span></span></div>
+      <button type="button" className="collapse-toggle" onClick={onToggleCollapse} aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'} title={collapsed ? 'Expand navigation' : 'Collapse navigation'}>
+        {collapsed ? <PanelLeftOpen size={16} strokeWidth={1.8} /> : <PanelLeftClose size={16} strokeWidth={1.8} />}
+      </button>
+    </div>
     <p className="nav-label">Workspace</p>
-    <nav>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-link ${page === id ? 'active' : ''}`} onClick={() => onNavigate(id)}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{id === 'tasks' && <em>2</em>}</button>)}</nav>
-    <div className="sidebar-note soft-outset"><span className="spark">✦</span><div><b>Kitchen rhythm</b><small>Plan, prep, enjoy.</small></div></div>
-    <div className="sidebar-foot"><span className="online-dot" /> Systems connected</div>
+    <nav>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-link ${page === id ? 'active' : ''}`} onClick={() => onNavigate(id)} title={label}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{id === 'tasks' && <em>2</em>}</button>)}</nav>
+    <div className="sidebar-foot"><span className="online-dot" /> <span className="sidebar-foot-text">Systems connected</span></div>
   </aside>;
 }
