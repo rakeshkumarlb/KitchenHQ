@@ -83,12 +83,15 @@ Defines food-preparation tasks for a human to execute.
 | `ingredients_used` | TEXT DEFAULT '[]' | JSON array of `{item_name, quantity, unit}` objects - everything this task will consume, keyed by `inventory.item_name` (case-insensitive), set at creation and deducted when the task is checked complete. `unit` may be g/kg/ml/l/pcs or a culinary unit (tsp/tbsp/cup, approximated to g/ml on deduction); each `quantity` is converted into the matched row's stored unit first. A line whose unit can't be reconciled with the row's (different dimension, or unrecognized) is skipped and surfaced in the completion response's `conversion_warnings`, not applied. |
 | `is_completed` | BOOLEAN DEFAULT 0 | Completion status |
 | `human_notes` | TEXT | Notes about the task |
-| `status` | TEXT DEFAULT 'proposed' | `proposed` \| `acknowledged` \| `completed` \| `cancelled` |
+| `status` | TEXT DEFAULT 'assigned' | `assigned` \| `acknowledged` \| `completed` \| `cancelled` \| `expired` |
 | `acknowledgement_key` | TEXT | Idempotency key set when ingredients were deducted (`prep-<id>-complete`) |
 | `score` | INTEGER (0-100) | Food Inspector's audit score for this task, or `NULL` if not yet audited |
 | `audit_feedback` | TEXT | Food Inspector's written explanation of `score` |
+| `created_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When the task was assigned - the clock `expire_stale_prep_tasks` measures its 2-hour window against |
 
-`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). Each `quantity` is converted into the matched row's stored unit before it's deducted (`kitchendb.units.convert` — see **Units of measure**); a line whose unit can't be reconciled with the row's is skipped and listed in the response's `conversion_warnings`. The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
+`add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` is the single human action that finalizes a task ("check this off") - there is no distinct "acknowledge" step after it. `completed` and `acknowledged` are not two stages of that action; they're its two possible outcomes, decided purely by whether `ingredients_used` was non-empty at creation: if non-empty, the call looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; if empty, it just sets `status='completed'` with nothing to deduct. Both statuses mean the same thing to the household ("done") and are treated identically everywhere they're read (`get_prep_schedules`, the dashboard, chatui's Task List all just check `is_completed`); the one place the distinction matters is reopening - only an `acknowledged` task is locked against a later `is_completed=False` call (since undoing a real deduction isn't safe to automate), while a `completed` task with nothing to deduct can still be unchecked. Each `quantity` is converted into the matched row's stored unit before it's deducted (`kitchendb.units.convert` — see **Units of measure**); a line whose unit can't be reconciled with the row's is skipped and listed in the response's `conversion_warnings`. The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged, not-yet-expired task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
+
+`expire_stale_prep_tasks()` (an MCP tool, no REST route - only the `expire_prep_tasks` scheduled job calls it) marks every task still `status='assigned'` more than 2 hours past `created_at` as `status='expired'`; expiring never touches inventory (same as cancellation) and is idempotent - already-`completed`/`acknowledged`/`cancelled`/`expired` rows are left alone. An `expired` task can no longer be acknowledged or cancelled (both reject with a 400), the same way an `acknowledged` one can't be reopened or cancelled.
 
 ### `inventory_transactions`
 Immutable ledger of every inventory quantity change made through acknowledgement flows.
@@ -208,14 +211,18 @@ on/off switch, read by the agent over `GET /api/profile`.
 `detailed_prep_schedule` and `shopping_items` both follow propose-then-acknowledge:
 proposing (`add_detailed_prep_schedule`, `add_shopping_items`) never touches `inventory`,
 and acknowledging requires a caller-supplied `acknowledgement_key`. For prep, the key is
-persisted on the still-present `detailed_prep_schedule` row (`status='acknowledged'`
-short-circuits a replay). Shopping items are instead *deleted* the moment they're
-acknowledged (that's what "clears" them off the list), so there's no row left to check a
-key against on replay — instead, each deduction's `inventory_transactions.idempotency_key`
-(`{acknowledgement_key}:{shopping_item_id}`) is checked directly before applying it, and a
-match is treated as an already-applied replay. Either way, a replay returns
-`{"replayed": true}` instead of double-applying. Preserve this pattern when adding new
-inventory-affecting flows.
+persisted on the still-present `detailed_prep_schedule` row - `status='acknowledged'`
+short-circuits a replay of `capture_prep_completion_status(is_completed=True)`, which
+just returns the row unchanged (no `replayed` flag; check `status` instead). Shopping
+items are instead *deleted* the moment they're acknowledged (that's what "clears" them
+off the list), so there's no row left to check a key against on replay — instead, each
+deduction's `inventory_transactions.idempotency_key`
+(`{acknowledgement_key}:{shopping_item_id}`) is checked directly before applying it, a
+match is treated as an already-applied replay, and `acknowledge_shopping_items` *does*
+report that back as `{"replayed": true, ...}` in its response (prep has no equivalent
+flag - its idempotency is silent). Both paths are idempotent either way; only the
+response shape differs. Preserve idempotency (not the exact response shape) when adding
+new inventory-affecting flows.
 
 ## Units of measure
 

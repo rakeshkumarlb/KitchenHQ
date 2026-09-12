@@ -19,7 +19,7 @@ export default function Sidebar({ page, onNavigate, open, collapsed, onToggleCol
       </button>
     </div>
     <p className="nav-label">Workspace</p>
-    <nav>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-link ${page === id ? 'active' : ''}`} onClick={() => onNavigate(id)} title={label}><Icon size={18} strokeWidth={1.8} /><span>{label}</span>{id === 'tasks' && <em>2</em>}</button>)}</nav>
+    <nav>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-link ${page === id ? 'active' : ''}`} onClick={() => onNavigate(id)} title={label}><Icon size={18} strokeWidth={1.8} /><span>{label}</span></button>)}</nav>
     <div className="sidebar-foot"><span className="online-dot" /> <span className="sidebar-foot-text">Systems connected</span></div>
   </aside>;
 }

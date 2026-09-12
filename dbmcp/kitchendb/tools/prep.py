@@ -97,6 +97,8 @@ def capture_prep_completion_status(prep_schedule_id: int, is_completed: bool, hu
             raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
         if task["status"] == "cancelled":
             raise ValueError("prep schedule is cancelled")
+        if task["status"] == "expired":
+            raise ValueError("prep schedule expired before it was acknowledged")
         if task["status"] == "acknowledged":
             if is_completed:
                 return dict(task)  # already finalized - idempotent no-op
@@ -104,7 +106,7 @@ def capture_prep_completion_status(prep_schedule_id: int, is_completed: bool, hu
 
         if not is_completed:
             connection.execute(
-                "UPDATE detailed_prep_schedule SET is_completed = 0, status = 'proposed', human_notes = ? WHERE id = ?",
+                "UPDATE detailed_prep_schedule SET is_completed = 0, status = 'assigned', human_notes = ? WHERE id = ?",
                 (human_notes, prep_schedule_id),
             )
             return fetch_record_in(connection, "detailed_prep_schedule", prep_schedule_id)
@@ -174,8 +176,38 @@ def cancel_prep_schedule(prep_schedule_id: int, human_notes: str = "") -> dict[s
             raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
         if task["status"] == "acknowledged":
             raise ValueError("cannot cancel a task whose ingredients were already deducted")
+        if task["status"] == "expired":
+            raise ValueError("cannot cancel a task that already expired")
         connection.execute(
             "UPDATE detailed_prep_schedule SET status = 'cancelled', is_completed = 0, human_notes = ? WHERE id = ?",
             (human_notes or task["human_notes"], prep_schedule_id),
         )
     return fetch_record("detailed_prep_schedule", prep_schedule_id)
+
+
+@tool
+def expire_stale_prep_tasks() -> dict[str, Any]:
+    """Mark every still-'assigned' prep task whose 2-hour action window has passed.
+
+    A task a human neither acknowledges (capture_prep_completion_status) nor cancels
+    (cancel_prep_schedule) within 2 hours of being created is treated as stale: the
+    prep window it was scheduled for has likely already passed. This only flips
+    status to 'expired' - it never touches inventory (same as cancellation) - and is
+    safe to call repeatedly: a task already 'completed', 'acknowledged', 'cancelled',
+    or previously 'expired' is left untouched. Intended to be called on a recurring
+    schedule (see the expire_prep_tasks job), not decided ad hoc by an agent role.
+    """
+    with connect() as connection:
+        expired_ids = [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM detailed_prep_schedule WHERE status = 'assigned' AND created_at <= datetime('now', '-2 hours')"
+            )
+        ]
+        if expired_ids:
+            placeholders = ",".join("?" * len(expired_ids))
+            connection.execute(
+                f"UPDATE detailed_prep_schedule SET status = 'expired' WHERE id IN ({placeholders})",
+                expired_ids,
+            )
+    return {"expired_ids": expired_ids, "expired_count": len(expired_ids)}

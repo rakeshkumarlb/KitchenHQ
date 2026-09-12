@@ -53,11 +53,16 @@ CREATE TABLE IF NOT EXISTS detailed_prep_schedule (
     ingredients_used TEXT NOT NULL DEFAULT '[]',
     is_completed BOOLEAN NOT NULL DEFAULT 0,
     human_notes TEXT,
-    status TEXT NOT NULL DEFAULT 'proposed',
+    status TEXT NOT NULL DEFAULT 'assigned',
     acknowledgement_key TEXT,
     score INTEGER CHECK (score BETWEEN 0 AND 100),
-    audit_feedback TEXT
+    audit_feedback TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+-- status: 'assigned' (fresh/reopened, awaiting human action) | 'completed' (checked off,
+-- had no ingredients_used to deduct) | 'acknowledged' (checked off, ingredients deducted -
+-- locked) | 'cancelled' (soft-cancelled, no deduction) | 'expired' (still 'assigned' 2+
+-- hours after created_at - see expire_stale_prep_tasks and the expire_prep_tasks job).
 
 CREATE TABLE IF NOT EXISTS inventory_transactions (
     id INTEGER PRIMARY KEY,

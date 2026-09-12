@@ -363,7 +363,7 @@ def test_prep_schedule_creation_returns_row_without_sending_email(client):
         json={"trigger_day": "monday", "trigger_time": "08:00", "task_type": "Batch prep", "detailed_instructions": ["Cook rice"]},
     )
     assert created.status_code == 200
-    assert created.json()["status"] == "proposed"
+    assert created.json()["status"] == "assigned"
     assert json.loads(created.json()["detailed_instructions"]) == ["Cook rice"]
     assert json.loads(created.json()["ingredients_used"]) == []
 
@@ -403,6 +403,46 @@ def test_prep_cancel_hides_task_and_blocks_after_deduction(client):
     client.patch(f"/api/prep-schedule/{deducting['id']}/completion", json={"is_completed": True})
     blocked = client.post(f"/api/prep-schedule/{deducting['id']}/cancel", json={})
     assert blocked.status_code == 400
+
+
+def test_expire_stale_prep_tasks_marks_only_old_assigned_tasks(client):
+    from kitchendb.db import connect
+    from kitchendb.tools.prep import expire_stale_prep_tasks
+
+    stale = client.post(
+        "/api/prep-schedule",
+        json={"trigger_day": "monday", "trigger_time": "08:00", "task_type": "Batch prep", "detailed_instructions": ["Cook rice"]},
+    ).json()
+    fresh = client.post(
+        "/api/prep-schedule",
+        json={"trigger_day": "monday", "trigger_time": "08:00", "task_type": "Batch prep", "detailed_instructions": ["Chop veg"]},
+    ).json()
+    cancelled = client.post(
+        "/api/prep-schedule",
+        json={"trigger_day": "monday", "trigger_time": "08:00", "task_type": "Batch prep", "detailed_instructions": ["Marinate"]},
+    ).json()
+    client.post(f"/api/prep-schedule/{cancelled['id']}/cancel", json={})
+
+    with connect() as connection:
+        connection.execute(
+            "UPDATE detailed_prep_schedule SET created_at = datetime('now', '-3 hours') WHERE id IN (?, ?)",
+            (stale["id"], cancelled["id"]),
+        )
+
+    result = expire_stale_prep_tasks()
+    assert result["expired_ids"] == [stale["id"]]
+
+    dashboard_tasks = {row["id"]: row for row in client.get("/api/dashboard").json()["tasks"]}
+    assert dashboard_tasks[stale["id"]]["status"] == "expired"
+    assert dashboard_tasks[fresh["id"]]["status"] == "assigned"
+    assert cancelled["id"] not in dashboard_tasks  # still excluded as cancelled, not re-expired
+
+    # Repeat calls are a no-op, and an expired task can no longer be actioned.
+    assert expire_stale_prep_tasks()["expired_ids"] == []
+    blocked_complete = client.patch(f"/api/prep-schedule/{stale['id']}/completion", json={"is_completed": True})
+    assert blocked_complete.status_code == 400
+    blocked_cancel = client.post(f"/api/prep-schedule/{stale['id']}/cancel", json={})
+    assert blocked_cancel.status_code == 400
 
 
 def test_dashboard_caps_completed_tasks_at_ten(client):

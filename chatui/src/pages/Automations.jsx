@@ -53,6 +53,12 @@ const JOB_META = {
 		description: "Scores every not-yet-audited prep task against the same rules and preferences the Sous Chef used, with written feedback.",
 		schedule: 'Daily, 22:45',
 	},
+	expire_prep_tasks: {
+		label: 'Task expiry sweep',
+		agent: 'Sous Chef',
+		description: 'Expires any prep task still unacknowledged and uncancelled 2 hours after it was assigned.',
+		schedule: 'Every 2 hours',
+	},
 };
 
 const RECENT_RUN_LIMIT = 10;

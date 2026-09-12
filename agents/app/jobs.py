@@ -64,6 +64,11 @@ PURPOSE: judge every detailed_prep_schedule row not yet scored against the same 
 3. Call get_unaudited_prep_tasks. If it returns nothing, there is nothing to audit this run - say so and stop.
 4. For every row returned (including cancelled ones - you are judging the decision, not whether it was performed), judge the instructions and ingredients_used against the dietary rules and household context from step 2, then call record_prep_task_audit(prep_schedule_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
 5. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
+    "expire_prep_tasks": """\
+PURPOSE: housekeeping sweep - expire any prep task a human never acknowledged or cancelled within its 2-hour action window, so stale tasks stop cluttering the task list.
+1. Call get_job_context.
+2. Call expire_stale_prep_tasks (no arguments) - it finds every detailed_prep_schedule row still 'assigned' with created_at more than 2 hours ago and marks each one 'expired'. It never touches inventory.
+3. Reply with a one-sentence summary of how many tasks (if any) were expired, using the tool's returned expired_ids.""",
 }
 
 JOB_ROLES = {
@@ -75,6 +80,7 @@ JOB_ROLES = {
     "pantry_manager": "pantry_manager",
     "menu_audit": "food_inspector",
     "task_audit": "food_inspector",
+    "expire_prep_tasks": "sous_chef",
 }
 
 # Structured result each job returns. Passed explicitly to run_agent so the weekly_menu
@@ -88,6 +94,7 @@ JOB_RESULT_MODELS = {
     "pantry_manager": PantryManagerResult,
     "menu_audit": FoodInspectorResult,
     "task_audit": FoodInspectorResult,
+    "expire_prep_tasks": SousChefResult,
 }
 
 # The DB write(s) each job exists to make. If the model stops short, run_agent sends
@@ -108,6 +115,7 @@ JOB_REQUIRED_TOOLS = {
     # hard requirement the way add_weekly_menu_item's 28 slots are.
     "menu_audit": ["get_unaudited_weekly_menu_items"],
     "task_audit": ["get_unaudited_prep_tasks"],
+    "expire_prep_tasks": ["expire_stale_prep_tasks"],
 }
 
 JOB_REQUIRED_TOOL_COUNTS = {
