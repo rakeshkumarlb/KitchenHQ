@@ -59,6 +59,14 @@ JOB_CONTEXT: dict[str, dict[str, str]] = {
         "rationale": "propose a shopping list for whatever is low or needed soon",
         "menu_scope": "this_week",
     },
+    "menu_audit": {
+        "focus": "every weekly_menu row not yet scored",
+        "rationale": "judge the Executive Chef's saved decisions against the household rules and preferences",
+    },
+    "task_audit": {
+        "focus": "every prep-schedule row not yet scored",
+        "rationale": "judge the Sous Chef's saved decisions against the household rules and preferences",
+    },
 }
 
 _MENU_LOOKUP_HINT = (

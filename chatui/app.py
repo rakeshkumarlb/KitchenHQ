@@ -85,6 +85,26 @@ async def update_profile(payload: dict) -> dict:
     return await db_request("PUT", "/api/profile", payload)
 
 
+@app.get("/api/household-members")
+async def list_household_members() -> list[dict]:
+    return await db_request("GET", "/api/household-members")
+
+
+@app.post("/api/household-members")
+async def add_household_member(payload: dict) -> dict:
+    return await db_request("POST", "/api/household-members", payload)
+
+
+@app.put("/api/household-members/{member_id}")
+async def update_household_member(member_id: int, payload: dict) -> dict:
+    return await db_request("PUT", f"/api/household-members/{member_id}", payload)
+
+
+@app.delete("/api/household-members/{member_id}")
+async def delete_household_member(member_id: int) -> dict:
+    return await db_request("DELETE", f"/api/household-members/{member_id}")
+
+
 # soft-deleted: no caller. The chatui Pantry page is read-only now, so nothing hits
 # these inventory-mutation proxies. The dbmcp routes/MCP tools behind them stay.
 #
@@ -115,11 +135,6 @@ async def delete_shopping_item(shopping_item_id: int) -> dict:
 @app.post("/api/shopping-items/acknowledge")
 async def acknowledge_shopping(payload: dict) -> dict:
     return await db_request("POST", "/api/shopping-items/acknowledge", payload)
-
-
-@app.post("/api/weekly-menu/{menu_item_id}/rating")
-async def rate_menu(menu_item_id: int, payload: dict) -> dict:
-    return await db_request("POST", f"/api/weekly-menu/{menu_item_id}/rating", payload)
 
 
 @app.patch("/api/prep-schedule/{task_id}/completion")

@@ -29,6 +29,7 @@ ROLE_PROMPTS = {
     "executive_chef": _read("executive_chef.md"),
     "sous_chef": _read("sous_chef.md"),
     "pantry_manager": _read("pantry_manager.md"),
+    "food_inspector": _read("food_inspector.md"),
 }
 
 

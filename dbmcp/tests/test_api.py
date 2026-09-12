@@ -266,42 +266,75 @@ def _add_menu_item(client, dish_name, *, day, meal):
     ).json()
 
 
-def test_favorite_recipes_track_recent_top_ratings(client):
-    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    meals = ["breakfast", "lunch", "snack", "dinner"]
-    # 12 distinct (day, meal) slots so each "Dish N" keeps its own weekly_menu row.
-    ids = {
-        f"Dish {n}": _add_menu_item(client, f"Dish {n}", day=days[n // 4], meal=meals[n % 4])["id"]
-        for n in range(12)
-    }
+def test_household_members_crud_and_preferences(client):
+    added = client.post(
+        "/api/household-members",
+        json={"name": "Kiran", "dietary_preferences": ["vegetarian", "no nuts"], "health_conditions": ["diabetic"]},
+    ).json()
+    assert added["name"] == "Kiran"
+    assert added["dietary_preferences"] == ["vegetarian", "no nuts"]
+    assert added["health_conditions"] == ["diabetic"]
 
-    # 4- and 5-star ratings land in favourites, newest first; a 3-star does not.
-    client.post(f"/api/weekly-menu/{ids['Dish 0']}/rating", json={"kid_rating": 5})
-    client.post(f"/api/weekly-menu/{ids['Dish 1']}/rating", json={"kid_rating": 3})
-    client.post(f"/api/weekly-menu/{ids['Dish 2']}/rating", json={"kid_rating": 4})
+    listed = client.get("/api/household-members").json()
+    assert [m["name"] for m in listed] == ["Kiran"]
 
-    favorites = json.loads(client.get("/api/profile").json()["favorite_recipes"])
-    assert [f["dish_name"] for f in favorites] == ["Dish 2", "Dish 0"]
+    updated = client.put(f"/api/household-members/{added['id']}", json={"health_conditions": ["diabetic", "lactose intolerant"]}).json()
+    assert updated["health_conditions"] == ["diabetic", "lactose intolerant"]
+    assert updated["dietary_preferences"] == ["vegetarian", "no nuts"]  # untouched by the partial patch
 
-    # Re-rating a dish moves it back to the front without duplicating it.
-    client.post(f"/api/weekly-menu/{ids['Dish 0']}/rating", json={"kid_rating": 5})
-    favorites = json.loads(client.get("/api/profile").json()["favorite_recipes"])
-    assert [f["dish_name"] for f in favorites] == ["Dish 0", "Dish 2"]
+    assert client.get("/api/dashboard").json()["household_members"][0]["name"] == "Kiran"
 
-    # A later low rating demotes a dish out of the list.
-    client.post(f"/api/weekly-menu/{ids['Dish 2']}/rating", json={"kid_rating": 2})
-    favorites = json.loads(client.get("/api/profile").json()["favorite_recipes"])
-    assert [f["dish_name"] for f in favorites] == ["Dish 0"]
+    deleted = client.delete(f"/api/household-members/{added['id']}")
+    assert deleted.status_code == 200
+    assert client.get("/api/household-members").json() == []
 
-    # The list never grows past ten - the oldest favourite falls off.
-    for n in range(11):
-        client.post(f"/api/weekly-menu/{ids[f'Dish {n}'] }/rating", json={"kid_rating": 5})
-    favorites = json.loads(client.get("/api/profile").json()["favorite_recipes"])
-    assert len(favorites) == 10
-    assert "Dish 0" not in [f["dish_name"] for f in favorites]
+    missing = client.put(f"/api/household-members/{added['id']}", json={"name": "Anyone"})
+    assert missing.status_code == 400
 
-    prefs = client.get("/api/profile").json()
-    assert prefs["favorite_recipes"]
+
+def test_weekly_menu_audit_flow(client):
+    # get_unaudited_weekly_menu_items / record_weekly_menu_audit are MCP-only tools
+    # (no REST route, like validate_weekly_menu_policy above), so exercise them directly.
+    from kitchendb.tools.audit import get_unaudited_weekly_menu_items, record_weekly_menu_audit
+
+    saved = _add_menu_item(client, "Dish 0", day="monday", meal="lunch")
+    assert saved["score"] is None
+
+    # A fresh DB seeds 28 menu rows, none audited yet, so this one is among them.
+    unaudited = get_unaudited_weekly_menu_items()
+    assert saved["id"] in [row["id"] for row in unaudited]
+    record_weekly_menu_audit(saved["id"], 85, "Balanced and vegetarian, matches the household's lunch rule.")
+
+    menu = client.get("/api/dashboard").json()["menu"]
+    audited = next(row for row in menu if row["id"] == saved["id"])
+    assert audited["score"] == 85
+    assert "vegetarian" in audited["audit_feedback"]
+
+    # Re-saving the slot clears the audit - it's a new decision awaiting judgement.
+    resaved = _add_menu_item(client, "Dish 0 v2", day="monday", meal="lunch")
+    assert resaved["score"] is None
+    assert resaved["audit_feedback"] is None
+
+
+def test_prep_task_audit_includes_cancelled(client):
+    from kitchendb.db import fetch_record
+    from kitchendb.tools.audit import get_unaudited_prep_tasks, record_prep_task_audit
+
+    task = client.post(
+        "/api/prep-schedule",
+        json={"trigger_day": "monday", "trigger_time": "07:00", "task_type": "Prep", "detailed_instructions": ["Chop vegetables."]},
+    ).json()
+    client.post(f"/api/prep-schedule/{task['id']}/cancel", json={"human_notes": "Not needed"})
+
+    # get_prep_schedules excludes cancelled tasks, but the audit still needs to judge
+    # the Sous Chef's original decision, so get_unaudited_prep_tasks includes it.
+    unaudited = get_unaudited_prep_tasks()
+    assert task["id"] in [row["id"] for row in unaudited]
+
+    record_prep_task_audit(task["id"], 70, "Reasonable ingredient choices for the assigned meal.")
+    stored = fetch_record("detailed_prep_schedule", task["id"])
+    assert stored["score"] == 70
+    assert stored["status"] == "cancelled"
 
 
 # Email notifications moved out of dbmcp - see agents/app/email/. The

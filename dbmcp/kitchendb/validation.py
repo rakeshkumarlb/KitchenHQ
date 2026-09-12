@@ -18,9 +18,6 @@ from .units import canonicalize_inventory_unit
 # can't bloat a row.
 MENU_LINES_LIMIT = 40
 
-# user_profile.favorite_recipes keeps at most this many dishes, newest first.
-FAVORITE_RECIPES_LIMIT = 10
-
 # Ingredients/terms that must never appear in a weekday lunch (school policy).
 RESTRICTED_LUNCH_TERMS = ("egg", "chicken", "beef", "pork", "fish", "meat", "turkey", "seafood")
 

@@ -1,5 +1,82 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, LoaderCircle, Save, Star } from 'lucide-react';
+import { Check, LoaderCircle, Pencil, Plus, Save, Star, Trash2 } from 'lucide-react';
+
+const splitTags = (value) => value.split(',').map((part) => part.trim()).filter(Boolean);
+const joinTags = (value) => (value || []).join(', ');
+
+function MemberRow({ member, onUpdate, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState(() => ({ name: member.name, preferences: joinTags(member.dietary_preferences), conditions: joinTags(member.health_conditions) }));
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!form.name.trim() || saving) return;
+    setSaving(true);
+    try {
+      await onUpdate(member.id, { name: form.name.trim(), dietary_preferences: splitTags(form.preferences), health_conditions: splitTags(form.conditions) });
+      setEditing(false);
+    } finally { setSaving(false); }
+  };
+
+  if (editing) {
+    return <div className="household-member soft-inset">
+      <input type="text" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Name" />
+      <input type="text" value={form.preferences} onChange={(event) => setForm((current) => ({ ...current, preferences: event.target.value }))} placeholder="Dietary preferences" />
+      <input type="text" value={form.conditions} onChange={(event) => setForm((current) => ({ ...current, conditions: event.target.value }))} placeholder="Health conditions" />
+      <button type="button" className="icon-button member-remove" onClick={save} disabled={saving} aria-label="Save member">{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}</button>
+    </div>;
+  }
+  return <div className="household-member soft-inset">
+    <div><b>{member.name}</b><p className="profile-hint">Preferences: {member.dietary_preferences.length ? member.dietary_preferences.join(', ') : 'none noted'}</p></div>
+    <div><p className="profile-hint">Health conditions: {member.health_conditions.length ? member.health_conditions.join(', ') : 'none noted'}</p></div>
+    <div style={{ display: 'flex', gap: 6 }}>
+      <button type="button" className="icon-button" onClick={() => setEditing(true)} aria-label={`Edit ${member.name}`}><Pencil size={15} /></button>
+      <button type="button" className="icon-button member-remove" onClick={() => onDelete(member.id)} aria-label={`Remove ${member.name}`}><Trash2 size={15} /></button>
+    </div>
+  </div>;
+}
+
+function HouseholdMembers({ members, onAdd, onUpdate, onDelete }) {
+  const [name, setName] = useState('');
+  const [preferences, setPreferences] = useState('');
+  const [conditions, setConditions] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  const addMember = async (event) => {
+    event.preventDefault();
+    if (!name.trim() || adding) return;
+    setAdding(true);
+    try {
+      await onAdd({ name: name.trim(), dietary_preferences: splitTags(preferences), health_conditions: splitTags(conditions) });
+      setName(''); setPreferences(''); setConditions('');
+    } finally { setAdding(false); }
+  };
+
+  return <section className="profile-favorites soft-outset">
+    <div className="profile-favorites-head">
+      <h3>Household members</h3>
+      <span>Preferences and health conditions considered when picking recipes and prep tasks.</span>
+    </div>
+    <div className="household-members">
+      {members.map((member) => <MemberRow member={member} onUpdate={onUpdate} onDelete={onDelete} key={member.id} />)}
+      {!members.length && <div className="empty-state">No household members added yet.</div>}
+    </div>
+    <form className="household-member-add" onSubmit={addMember} style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+      <label className="profile-field"><span>Name</span>
+        <input type="text" value={name} onChange={(event) => setName(event.target.value)} placeholder="Jordan Kim" />
+      </label>
+      <label className="profile-field"><span>Dietary preferences</span>
+        <input type="text" value={preferences} onChange={(event) => setPreferences(event.target.value)} placeholder="vegetarian, no nuts" />
+      </label>
+      <label className="profile-field"><span>Health conditions</span>
+        <input type="text" value={conditions} onChange={(event) => setConditions(event.target.value)} placeholder="diabetic, lactose intolerant" />
+      </label>
+      <button type="submit" className="secondary-button" disabled={!name.trim() || adding} style={{ justifySelf: 'start' }}>
+        {adding ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Add member
+      </button>
+    </form>
+  </section>;
+}
 
 const parseFavorites = (raw) => {
   try {
@@ -16,8 +93,9 @@ const formatDate = (value) => {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
-export default function Profile({ data, onSave }) {
+export default function Profile({ data, onSave, onAddMember, onUpdateMember, onDeleteMember }) {
   const profile = data.profile || {};
+  const householdMembers = data.household_members || [];
   const [form, setForm] = useState({ name: '', email: '', cc_emails: '', notes: '', notify_on_task_creation: true });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -72,19 +150,21 @@ export default function Profile({ data, onSave }) {
       </button>
     </form>
 
-    <section className="profile-favorites soft-outset">
+    <HouseholdMembers members={householdMembers} onAdd={onAddMember} onUpdate={onUpdateMember} onDelete={onDeleteMember} />
+
+    {favorites.length > 0 && <section className="profile-favorites soft-outset">
       <div className="profile-favorites-head">
         <h3>Top 10 favourite recipes</h3>
-        <span>Kept from the most recent 4- and 5-star ratings on the weekly menu.</span>
+        <span>Recipes the household starred highly in the past.</span>
       </div>
-      {favorites.length ? <ol className="favorite-list">
+      <ol className="favorite-list">
         {favorites.map((entry, index) => <li key={`${entry.dish_name}-${index}`}>
           <span className="favorite-rank">{String(index + 1).padStart(2, '0')}</span>
           <span className="favorite-name">{entry.dish_name}</span>
           <span className="favorite-stars">{Array.from({ length: Math.min(5, Math.max(0, entry.rating || 0)) }).map((_, star) => <Star key={star} size={12} fill="currentColor" />)}</span>
           <span className="favorite-date">{formatDate(entry.rated_at)}</span>
         </li>)}
-      </ol> : <div className="empty-state">No rated favourites yet. Star a dish 4 or 5 on the weekly menu to build this list.</div>}
-    </section>
+      </ol>
+    </section>}
   </div>;
 }

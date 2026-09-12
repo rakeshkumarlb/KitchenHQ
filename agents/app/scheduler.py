@@ -23,4 +23,6 @@ def configure_scheduler(settings: Settings) -> AsyncIOScheduler:
     scheduler.add_job(run_job, "cron", day_of_week="mon-fri", hour=6, minute=30, args=["morning_cooking", settings], id="morning-cooking", replace_existing=True)
     scheduler.add_job(run_job, "cron", day_of_week="mon-fri", hour=18, minute=0, args=["dinner_cooking", settings], id="dinner-cooking", replace_existing=True)
     scheduler.add_job(run_job, "cron", hour=18, minute=0, args=["pantry_manager", settings], id="pantry-manager-daily", replace_existing=True)
+    scheduler.add_job(run_job, "cron", hour=22, minute=30, args=["menu_audit", settings], id="menu-audit-nightly", replace_existing=True)
+    scheduler.add_job(run_job, "cron", hour=22, minute=45, args=["task_audit", settings], id="task-audit-nightly", replace_existing=True)
     return scheduler

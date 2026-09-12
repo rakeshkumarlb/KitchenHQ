@@ -45,11 +45,6 @@ class MenuItemRequest(BaseModel):
         return validate_day(value)
 
 
-class MenuRatingRequest(BaseModel):
-    kid_rating: int = Field(ge=1, le=5)
-    human_feedback: str = ""
-
-
 class PrepScheduleRequest(BaseModel):
     trigger_day: str
     trigger_time: str = Field(min_length=1)
@@ -110,3 +105,15 @@ class ProfileUpdateRequest(BaseModel):
     cc_emails: str | None = None
     notes: str | None = None
     notify_on_task_creation: bool | None = None
+
+
+class HouseholdMemberRequest(BaseModel):
+    name: str = Field(min_length=1)
+    dietary_preferences: list[str] = Field(default_factory=list)
+    health_conditions: list[str] = Field(default_factory=list)
+
+
+class HouseholdMemberUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    dietary_preferences: list[str] | None = None
+    health_conditions: list[str] | None = None

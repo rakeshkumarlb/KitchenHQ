@@ -18,11 +18,12 @@ from .db import connect, fetch_record_in
 from .models import (
     AgentRunRequest,
     ChatSessionRequest,
+    HouseholdMemberRequest,
+    HouseholdMemberUpdateRequest,
     InventoryAddRequest,
     InventoryAdjustmentRequest,
     InventoryDiscardRequest,
     MenuItemRequest,
-    MenuRatingRequest,
     PrepCancellationRequest,
     PrepCompletionRequest,
     PrepScheduleRequest,
@@ -33,7 +34,14 @@ from .models import (
 )
 from .tools.inventory import add_inventory, adjust_inventory_quantity, remove_or_discard_inventory
 from .tools.prep import add_detailed_prep_schedule, cancel_prep_schedule, capture_prep_completion_status
-from .tools.profile import get_user_profile, update_user_profile
+from .tools.profile import (
+    add_household_member,
+    delete_household_member,
+    get_user_profile,
+    list_household_members,
+    update_household_member,
+    update_user_profile,
+)
 from .tools.shopping import (
     acknowledge_shopping_items,
     add_shopping_items,
@@ -42,7 +50,7 @@ from .tools.shopping import (
     edit_shopping_item,
     get_shopping_items,
 )
-from .tools.weekly_menu import add_weekly_menu_item, capture_weekly_menu_rating
+from .tools.weekly_menu import add_weekly_menu_item
 
 router = APIRouter()
 
@@ -85,6 +93,10 @@ def dashboard() -> dict[str, Any]:
             "profile": (lambda row: dict(row) if row is not None else {})(
                 connection.execute("SELECT * FROM user_profile WHERE id = 1").fetchone()
             ),
+            "household_members": [
+                {**dict(row), "dietary_preferences": json.loads(row["dietary_preferences"]), "health_conditions": json.loads(row["health_conditions"])}
+                for row in connection.execute("SELECT * FROM household_members ORDER BY id")
+            ],
             # Day / meal vocabulary for non-Python clients (the chatui React app) - the
             # single source of truth is shared/constants.py, vendored here as constants.py.
             "constants": {
@@ -124,14 +136,6 @@ def api_discard_inventory(item_id: int, request: InventoryDiscardRequest) -> dic
 def api_add_menu_item(request: MenuItemRequest) -> dict[str, Any]:
     try:
         return add_weekly_menu_item(**request.model_dump())
-    except ValueError as error:
-        raise _tool_error(error) from error
-
-
-@router.post("/api/weekly-menu/{menu_item_id}/rating")
-def api_capture_rating(menu_item_id: int, request: MenuRatingRequest) -> dict[str, Any]:
-    try:
-        return capture_weekly_menu_rating(menu_item_id, **request.model_dump())
     except ValueError as error:
         raise _tool_error(error) from error
 
@@ -227,6 +231,35 @@ def api_get_profile() -> dict[str, Any]:
 def api_update_profile(request: ProfileUpdateRequest) -> dict[str, Any]:
     try:
         return update_user_profile(**request.model_dump())
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.get("/api/household-members")
+def api_list_household_members() -> list[dict[str, Any]]:
+    return list_household_members()
+
+
+@router.post("/api/household-members")
+def api_add_household_member(request: HouseholdMemberRequest) -> dict[str, Any]:
+    try:
+        return add_household_member(**request.model_dump())
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.put("/api/household-members/{member_id}")
+def api_update_household_member(member_id: int, request: HouseholdMemberUpdateRequest) -> dict[str, Any]:
+    try:
+        return update_household_member(member_id, **request.model_dump())
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.delete("/api/household-members/{member_id}")
+def api_delete_household_member(member_id: int) -> dict[str, Any]:
+    try:
+        return delete_household_member(member_id)
     except ValueError as error:
         raise _tool_error(error) from error
 

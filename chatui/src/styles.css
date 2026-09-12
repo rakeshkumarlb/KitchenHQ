@@ -46,5 +46,15 @@
 .favorite-name{font-weight:500}
 .favorite-stars{display:inline-flex;gap:1px;color:var(--green)}
 .favorite-date{color:var(--muted);font:10px 'DM Mono',monospace}
+.audit-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:8px;background:#dde2dc;color:var(--muted);font:9px 'DM Mono',monospace;text-transform:uppercase;white-space:nowrap}
+.audit-badge.good{background:#d7e8d6;color:var(--green)}
+.audit-badge.fair{background:#f2e3ba;color:#8a6a1f}
+.audit-badge.poor{background:#f2d4ca;color:#984c39}
+.recipe-section .audit-badge{margin-bottom:8px}
+.household-members{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+.household-member{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:start;padding:14px;border-radius:14px}
+.household-member input{width:100%;padding:9px 10px;border:0;border-radius:9px;background:var(--surface);box-shadow:inset 3px 3px 6px var(--shadow-dark),inset -3px -3px 6px var(--shadow-light);color:var(--ink);font:11px 'Plus Jakarta Sans',sans-serif}
+.household-member .member-remove{align-self:center}
+@media(max-width:650px){.household-member{grid-template-columns:1fr}}
 @media(max-width:900px){.pantry-row.read-only{grid-template-columns:1fr 130px}}
 @media(max-width:650px){.pantry-row.read-only{grid-template-columns:1fr 92px}.consumption-row{grid-template-columns:1fr 70px;gap:10px}.consumption-bar{display:none}.shopping-add{grid-template-columns:1fr 1fr}.shopping-add input:first-child{grid-column:1 / -1}.shopping-add .shopping-confirm{grid-column:1 / -1}}

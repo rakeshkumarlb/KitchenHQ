@@ -64,11 +64,11 @@ Stores planned meals for each day of the week.
 | `macros` | TEXT | Macronutrient information |
 | `ingredients` | TEXT | JSON array of ingredient strings (plain text, one per entry). |
 | `full_recipe` | TEXT DEFAULT '' | JSON array of method-step strings (plain text, one per entry). |
-| `kid_rating` | INTEGER (1-5) | Child rating |
-| `human_feedback` | TEXT | Additional feedback |
+| `score` | INTEGER (0-100) | Food Inspector's audit score for this slot's dish, or `NULL` if not yet audited |
+| `audit_feedback` | TEXT | Food Inspector's written explanation of `score` |
 | `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When the slot was last (re)planned — refreshed on every `add_weekly_menu_item` upsert (both INSERT and ON CONFLICT UPDATE). |
 
-One row per `(day_of_week, meal_type)`, enforced by a `UNIQUE` index (`idx_weekly_menu_day_meal`). `add_weekly_menu_item(… ingredients: list[str], full_recipe: list[str] = [])` is a true atomic upsert (`INSERT … ON CONFLICT(day_of_week, meal_type) DO UPDATE`); day/meal are normalized (`.strip().lower()`) and validated against a fixed vocabulary (`constants.DAY_SET`, `constants.MEAL_TYPE_SET`), and both list args are trimmed and capped (`validation.MENU_LINES_LIMIT`, 40) then stored as JSON. The table holds at most 7 × 4 = 28 rows and two `weekly_menu` runs racing can't double-insert. The weekly plan is built slot-by-slot with `add_weekly_menu_item` and then checked with `validate_weekly_menu_policy` (no args, validates the saved table).
+One row per `(day_of_week, meal_type)`, enforced by a `UNIQUE` index (`idx_weekly_menu_day_meal`). `add_weekly_menu_item(… ingredients: list[str], full_recipe: list[str] = [])` is a true atomic upsert (`INSERT … ON CONFLICT(day_of_week, meal_type) DO UPDATE`); day/meal are normalized (`.strip().lower()`) and validated against a fixed vocabulary (`constants.DAY_SET`, `constants.MEAL_TYPE_SET`), and both list args are trimmed and capped (`validation.MENU_LINES_LIMIT`, 40) then stored as JSON. Every upsert also resets `score`/`audit_feedback` to `NULL`, since a re-planned slot is a new decision awaiting judgement. The table holds at most 7 × 4 = 28 rows and two `weekly_menu` runs racing can't double-insert. The weekly plan is built slot-by-slot with `add_weekly_menu_item` and then checked with `validate_weekly_menu_policy` (no args, validates the saved table). See **Food Inspector / auditing** below for how `score`/`audit_feedback` get filled in.
 
 ### `detailed_prep_schedule`
 Defines food-preparation tasks for a human to execute.
@@ -85,6 +85,8 @@ Defines food-preparation tasks for a human to execute.
 | `human_notes` | TEXT | Notes about the task |
 | `status` | TEXT DEFAULT 'proposed' | `proposed` \| `acknowledged` \| `completed` \| `cancelled` |
 | `acknowledgement_key` | TEXT | Idempotency key set when ingredients were deducted (`prep-<id>-complete`) |
+| `score` | INTEGER (0-100) | Food Inspector's audit score for this task, or `NULL` if not yet audited |
+| `audit_feedback` | TEXT | Food Inspector's written explanation of `score` |
 
 `add_detailed_prep_schedule(detailed_instructions, ingredients_used)` validates and stores both JSON fields in one call - this is the only place that supplies what a task will consume; there is no separate acknowledge-time step to add it. `capture_prep_completion_status(is_completed=True)` finalizes a task: if `ingredients_used` is non-empty it looks up each `item_name` in `inventory` (case-insensitive), deducts `quantity` from every match, writes one `inventory_transactions` row per match (key `prep-<id>-complete:<index>`), and sets `status='acknowledged'`; otherwise it just sets `status='completed'`. Only an `acknowledged` task is locked against reopening (a `completed` task with nothing to deduct can still be unchecked). Each `quantity` is converted into the matched row's stored unit before it's deducted (`kitchendb.units.convert` — see **Units of measure**); a line whose unit can't be reconciled with the row's is skipped and listed in the response's `conversion_warnings`. The deduction is **never blocked by low stock** - present ingredients are deducted (balance allowed to go negative) and an `item_name` with no matching `inventory` row is skipped, so acknowledging always succeeds. `add_detailed_prep_schedule` only writes the row — any email is sent separately by the agent via `send_prep_task_email` (see Notifications below). `cancel_prep_schedule` soft-cancels a not-yet-acknowledged task (`status='cancelled'`); cancelled tasks are excluded from `get_prep_schedules` and the dashboard, which also caps returned completed tasks at the 10 most recent.
 
@@ -130,7 +132,7 @@ Best-effort telemetry for agent jobs, both scheduled and on-demand (`agents/app/
 | Column | Type | Description |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY | Run identifier |
-| `agent_role` | TEXT | `executive_chef` \| `sous_chef` \| `pantry_manager` |
+| `agent_role` | TEXT | `executive_chef` \| `sous_chef` \| `pantry_manager` \| `food_inspector` |
 | `job_name` | TEXT | Scheduled job name, e.g. `weekly_menu` |
 | `status` | TEXT | `completed` \| `failed` |
 | `result` | TEXT | Result summary |
@@ -159,13 +161,35 @@ A single household profile row (`id` is pinned to `1`), seeded with `name = 'Ale
 | `email` | TEXT DEFAULT '' | Where prep-task alert emails are sent |
 | `cc_emails` | TEXT DEFAULT '' | Extra addresses (comma/semicolon/newline separated) cc'd on every task-alert email |
 | `notes` | TEXT DEFAULT '' | Free-text "note for the chef" — surfaced to the Executive Chef as weekly-menu planning context |
-| `favorite_recipes` | TEXT DEFAULT '[]' | JSON array (max 10, newest first) of `{dish_name, rating, rated_at}`, maintained automatically from weekly-menu ratings — not user-patchable |
+| `favorite_recipes` | TEXT DEFAULT '[]' | JSON array (max 10, newest first) of `{dish_name, rating, rated_at}` — not user-patchable. Legacy field: nothing currently writes to it (the weekly-menu star-rating flow that used to populate it was removed in favour of `household_members`), but it is still read and returned as-is. |
 | `notify_on_task_creation` | INTEGER DEFAULT 1 | Global email switch: `1` = the `send_*_email` tools deliver, `0` = they all return `{"sent": false}` |
 | `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last write |
 
 `GET /api/profile` returns the row; `PUT /api/profile` patches only the fields supplied (`name`, `email`, `cc_emails`, `notes`, `notify_on_task_creation`; a non-`@` `email` is rejected 400). The row is also embedded in `GET /api/dashboard` as `profile`.
 
-`favorite_recipes` is rewritten inside `capture_weekly_menu_rating` (`POST /api/weekly-menu/{id}/rating`): a 4- or 5-star rating moves that dish to the front (newest first, deduped case-insensitively), any lower rating removes it, and the list is trimmed to 10 — so an older favourite falls off once ten fresher dishes have been top-rated. The `get_household_preferences` MCP tool returns `{chef_note, favorite_recipes, has_preferences, guidance}` for agents (the Executive Chef consults it before planning a week); `has_preferences` is `false` and `guidance` says "optional context, not a blocker" when both the note and the favourites list are empty, so a fresh install doesn't stall the weekly-menu job.
+The `get_household_preferences` MCP tool returns `{chef_note, favorite_recipes, household_members, has_preferences, guidance}` for agents — the single shared source of household rules/preferences consulted by every cooking-decision role (Executive Chef and Sous Chef before deciding what to cook, Food Inspector when auditing what they decided); `has_preferences` is `false` and `guidance` says "optional context, not a blocker" when the note, favourites, and household members are all empty, so a fresh install doesn't stall the weekly-menu job.
+
+### `household_members`
+Individual household members, each with their own dietary preferences and health conditions — consulted alongside the chef note/favourites when picking recipes, and fed to the Food Inspector as the same context the cooking roles used.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY | Member identifier |
+| `name` | TEXT | Member's name |
+| `dietary_preferences` | TEXT DEFAULT '[]' | JSON array of short plain-text strings, e.g. `["vegetarian", "no nuts"]` |
+| `health_conditions` | TEXT DEFAULT '[]' | JSON array of short plain-text strings, e.g. `["diabetic", "lactose intolerant"]` |
+| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last write |
+
+`add_household_member`/`update_household_member`/`delete_household_member`/`list_household_members` are REST-only (`/api/household-members`, human-edited on the Profile page, not agent tools). The row is also embedded in `GET /api/dashboard` as `household_members` and folded into `get_household_preferences`.
+
+## Food Inspector / auditing
+
+The Food Inspector is an LLM-as-judge role: it evaluates weekly-menu slots and prep tasks that the Executive Chef / Sous Chef already saved, scoring each against the exact same rules those roles used (`system.md`'s dietary/macro rules plus `get_household_preferences`) — no separate rules file, so the judge and the judged always see the same context. It never edits menu/task content, only records a verdict via two tools:
+
+- `get_unaudited_weekly_menu_items()` / `record_weekly_menu_audit(weekly_menu_id, score, audit_feedback)` — operate on `weekly_menu` rows where `score IS NULL`.
+- `get_unaudited_prep_tasks()` / `record_prep_task_audit(prep_schedule_id, score, audit_feedback)` — operate on `detailed_prep_schedule` rows where `score IS NULL`, **including cancelled tasks** (the decision being judged is what the Sous Chef planned, not whether it was later performed — contrast with `get_prep_schedules`, which excludes cancelled rows).
+
+Both run as nightly scheduled jobs (`menu_audit`, `task_audit` in `agents/app/jobs.py`), also invocable on demand from chatui's Automations page like any other job. `score`/`audit_feedback` ride along in `GET /api/dashboard`'s `menu`/`tasks` arrays; a `NULL` score means "not yet audited."
 
 ## Notifications
 

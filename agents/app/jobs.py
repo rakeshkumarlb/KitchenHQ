@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .kitchen_agent import run_agent
-from .models import ExecutiveChefResult, PantryManagerResult, SousChefResult
+from .models import ExecutiveChefResult, FoodInspectorResult, PantryManagerResult, SousChefResult
 from .telemetry import record_agent_run
 
 logger = logging.getLogger("kitchenhq-agent")
@@ -18,7 +18,7 @@ logger = logging.getLogger("kitchenhq-agent")
 
 _PREP_STEPS = """\
 2. job.target_menu_days from get_job_context holds the exact weekday(s) for {day_phrase}. Load the weekly_menu rows for {meal_scope} on those weekday(s) - the table is keyed by weekday name, not date.
-3. Call get_inventory and match each ingredient the task will actually use to its exact item_name spelling there.
+3. Call get_household_preferences and get_inventory. Match each ingredient the task will actually use to its exact item_name spelling in inventory, and let any household member's dietary preferences or health conditions shape the instructions (e.g. keep an allergen out, note a substitution).
 4. Save with add_detailed_prep_schedule ({time_cap}): detailed_instructions is your ordered list of instruction-step strings (one step per list entry, no numbering); ingredients_used is [{{item_name, quantity, unit}}] for every ingredient matched in step 3, using the item_name exactly as it appears in inventory - this is what lets inventory deduct automatically once a human checks the task complete, so do not omit an ingredient that has a matching inventory row. Give each unit as g/kg, ml/l or pcs matching that item's inventory dimension (tsp/tbsp/cup are accepted and auto-approximated to g/ml); the quantity is converted into the row's own unit on deduction, so match the dimension, not the exact unit. This save is the required outcome - you are not finished until it succeeds.
 5. Call send_prep_task_email: prep_date is the date in job.target_menu_days, meals is [{{dish, meal_type, servings}}] for each dish (household size 4), steps is your instructions, ingredients is what will be used.
 6. Reply with a two-sentence summary naming the dishes and the saved prep_schedule id(s)."""
@@ -50,6 +50,20 @@ PURPOSE: propose a shopping list for whatever is running low or needed for the c
 4. Work out what is genuinely needed (below minimum_threshold or short for the week) and call add_shopping_items with it - it merges into whatever is already pending, so just call it with whatever is newly needed; there's no need to check for or avoid duplicates yourself. This save is the required outcome.
 5. Call send_shopping_list_email: items is the exact list you passed to add_shopping_items in step 4, each as {item_name, proposed_quantity, unit, reason} with a short reason; reasoning is the overall rationale. The tool does not read the list itself.
 6. Reply with a two-sentence summary of what was added.""",
+    "menu_audit": """\
+PURPOSE: judge every weekly_menu row not yet scored against the same rules and preferences the Executive Chef used.
+1. Call get_job_context.
+2. Call get_household_preferences so you judge against the same chef note, favourites, and household members' preferences/conditions the Executive Chef had.
+3. Call get_unaudited_weekly_menu_items. If it returns nothing, there is nothing to audit this run - say so and stop.
+4. For every row returned, judge it against the dietary/macro rules (lunches vegetarian with no egg/meat/fish, chicken dinner-only, etc.) and the household context from step 2, then call record_weekly_menu_audit(weekly_menu_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
+5. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
+    "task_audit": """\
+PURPOSE: judge every detailed_prep_schedule row not yet scored against the same rules and preferences the Sous Chef used.
+1. Call get_job_context.
+2. Call get_household_preferences so you judge against the same household context the Sous Chef had.
+3. Call get_unaudited_prep_tasks. If it returns nothing, there is nothing to audit this run - say so and stop.
+4. For every row returned (including cancelled ones - you are judging the decision, not whether it was performed), judge the instructions and ingredients_used against the dietary rules and household context from step 2, then call record_prep_task_audit(prep_schedule_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
+5. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
 }
 
 JOB_ROLES = {
@@ -59,6 +73,8 @@ JOB_ROLES = {
     "morning_cooking": "sous_chef",
     "dinner_cooking": "sous_chef",
     "pantry_manager": "pantry_manager",
+    "menu_audit": "food_inspector",
+    "task_audit": "food_inspector",
 }
 
 # Structured result each job returns. Passed explicitly to run_agent so the weekly_menu
@@ -70,6 +86,8 @@ JOB_RESULT_MODELS = {
     "morning_cooking": SousChefResult,
     "dinner_cooking": SousChefResult,
     "pantry_manager": PantryManagerResult,
+    "menu_audit": FoodInspectorResult,
+    "task_audit": FoodInspectorResult,
 }
 
 # The DB write(s) each job exists to make. If the model stops short, run_agent sends
@@ -85,6 +103,11 @@ JOB_REQUIRED_TOOLS = {
     "morning_cooking": ["add_detailed_prep_schedule"],
     "dinner_cooking": ["add_detailed_prep_schedule"],
     "pantry_manager": ["add_shopping_items"],
+    # Only the "did you even check" step is enforced - how many rows get audited varies
+    # run to run (some nights there's nothing new to score), so record_*_audit isn't a
+    # hard requirement the way add_weekly_menu_item's 28 slots are.
+    "menu_audit": ["get_unaudited_weekly_menu_items"],
+    "task_audit": ["get_unaudited_prep_tasks"],
 }
 
 JOB_REQUIRED_TOOL_COUNTS = {

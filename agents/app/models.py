@@ -18,9 +18,16 @@ class ExecutiveChefResult(BaseModel):
     menu_item_ids: list[int] = Field(default_factory=list)
 
 
+class FoodInspectorResult(BaseModel):
+    summary: str = Field(description="Short description of what was audited and the overall pattern")
+    audited_ids: list[int] = Field(default_factory=list)
+
+
 # Per-role response_format for interactive turns. executive_chef is intentionally
-# absent: chat replies stay conversational text. The weekly_menu *job* still gets a
+# absent: chat replies stay conversational text. The weekly_menu job still gets a
 # structured result - jobs.py passes ExecutiveChefResult to run_agent explicitly.
+# food_inspector is likewise absent: it has no chat persona, only scheduled audit jobs,
+# which pass FoodInspectorResult explicitly the same way.
 RESPONSE_FORMATS = {
     "sous_chef": SousChefResult,
     "pantry_manager": PantryManagerResult,

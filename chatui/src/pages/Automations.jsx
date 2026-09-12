@@ -41,6 +41,18 @@ const JOB_META = {
 		description: 'Checks stock against the upcoming menu and saves a shopping list proposal. Never changes inventory.',
 		schedule: 'Daily, 18:00',
 	},
+	menu_audit: {
+		label: 'Menu audit',
+		agent: 'Food Inspector',
+		description: "Scores every not-yet-audited weekly menu slot against the household's dietary rules and preferences, with written feedback.",
+		schedule: 'Daily, 22:30',
+	},
+	task_audit: {
+		label: 'Task audit',
+		agent: 'Food Inspector',
+		description: "Scores every not-yet-audited prep task against the same rules and preferences the Sous Chef used, with written feedback.",
+		schedule: 'Daily, 22:45',
+	},
 };
 
 const RECENT_RUN_LIMIT = 10;

@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS weekly_menu (
     macros TEXT NOT NULL,
     ingredients TEXT NOT NULL,
     full_recipe TEXT NOT NULL DEFAULT '',
-    kid_rating INTEGER CHECK (kid_rating BETWEEN 1 AND 5),
-    human_feedback TEXT,
+    score INTEGER CHECK (score BETWEEN 0 AND 100),
+    audit_feedback TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 -- Exactly one row per (day_of_week, meal_type); the unique index makes
@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS detailed_prep_schedule (
     is_completed BOOLEAN NOT NULL DEFAULT 0,
     human_notes TEXT,
     status TEXT NOT NULL DEFAULT 'proposed',
-    acknowledgement_key TEXT
+    acknowledgement_key TEXT,
+    score INTEGER CHECK (score BETWEEN 0 AND 100),
+    audit_feedback TEXT
 );
 
 CREATE TABLE IF NOT EXISTS inventory_transactions (
@@ -104,5 +106,13 @@ CREATE TABLE IF NOT EXISTS user_profile (
     notes TEXT NOT NULL DEFAULT '',
     favorite_recipes TEXT NOT NULL DEFAULT '[]',
     notify_on_task_creation INTEGER NOT NULL DEFAULT 1,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS household_members (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    dietary_preferences TEXT NOT NULL DEFAULT '[]',
+    health_conditions TEXT NOT NULL DEFAULT '[]',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

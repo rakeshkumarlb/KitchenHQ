@@ -17,6 +17,6 @@ from __future__ import annotations
 from .registry import registered_tools
 
 # Imported for their registration side effect.
-from . import inventory, weekly_menu, prep, shopping, profile  # noqa: E402,F401
+from . import inventory, weekly_menu, prep, shopping, profile, audit  # noqa: E402,F401
 
 __all__ = ["registered_tools"]
