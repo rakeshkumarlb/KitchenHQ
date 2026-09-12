@@ -41,7 +41,7 @@ def make_email_tools(settings: Settings) -> list[StructuredTool]:
         chat user asks for a prep/cooking plan. Include:
           - prep_date: the date this prep is for (get it from get_job_context)
           - meals: [{dish, meal_type, servings}] - the meal(s) being prepared and for how
-            many people (the household is 4: 2 adults + 2 kids)
+            many people (household size comes from get_household_preferences' household_members)
           - steps: the ordered, detailed steps to perform
           - ingredients: the ingredients that will be used
         Returns {"sent": bool, ...}; a missing mailbox is reported, not an error.
