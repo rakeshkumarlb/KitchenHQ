@@ -117,3 +117,11 @@ class HouseholdMemberUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     dietary_preferences: list[str] | None = None
     health_conditions: list[str] | None = None
+
+
+class RecipeRequest(BaseModel):
+    recipe: dict[str, Any]
+
+
+class RecipeRatingRequest(BaseModel):
+    rating: int = Field(ge=1, le=5)

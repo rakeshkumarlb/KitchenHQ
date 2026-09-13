@@ -28,6 +28,8 @@ from .models import (
     PrepCompletionRequest,
     PrepScheduleRequest,
     ProfileUpdateRequest,
+    RecipeRatingRequest,
+    RecipeRequest,
     ShoppingAcknowledgementRequest,
     ShoppingItemEditRequest,
     ShoppingItemsRequest,
@@ -49,6 +51,15 @@ from .tools.shopping import (
     delete_shopping_item,
     edit_shopping_item,
     get_shopping_items,
+)
+from .tools.recipes import (
+    add_recipe,
+    delete_recipe,
+    get_recipe,
+    list_recipes,
+    rate_recipe,
+    search_recipes,
+    update_recipe,
 )
 from .tools.weekly_menu import add_weekly_menu_item
 
@@ -260,6 +271,59 @@ def api_update_household_member(member_id: int, request: HouseholdMemberUpdateRe
 def api_delete_household_member(member_id: int) -> dict[str, Any]:
     try:
         return delete_household_member(member_id)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.get("/api/recipes/search")
+def api_search_recipes(q: str, top_k: int = 5) -> list[dict[str, Any]]:
+    try:
+        return search_recipes(q, top_k)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.get("/api/recipes")
+def api_list_recipes(limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+    return list_recipes(limit, offset)
+
+
+@router.get("/api/recipes/{recipe_id}")
+def api_get_recipe(recipe_id: int) -> dict[str, Any]:
+    try:
+        return get_recipe(recipe_id)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.post("/api/recipes")
+def api_add_recipe(request: RecipeRequest) -> dict[str, Any]:
+    try:
+        return add_recipe(request.recipe)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.put("/api/recipes/{recipe_id}")
+def api_update_recipe(recipe_id: int, request: RecipeRequest) -> dict[str, Any]:
+    try:
+        return update_recipe(recipe_id, request.recipe)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.delete("/api/recipes/{recipe_id}")
+def api_delete_recipe(recipe_id: int) -> dict[str, Any]:
+    try:
+        return delete_recipe(recipe_id)
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.patch("/api/recipes/{recipe_id}/rating")
+def api_rate_recipe(recipe_id: int, request: RecipeRatingRequest) -> dict[str, Any]:
+    try:
+        return rate_recipe(recipe_id, request.rating)
     except ValueError as error:
         raise _tool_error(error) from error
 

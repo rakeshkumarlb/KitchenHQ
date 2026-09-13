@@ -18,6 +18,8 @@ already on this schema; there is no in-place migration of older layouts.
 | `kitchendb/schema.py` | Runs `schema.sql`, then seeds a fresh DB. |
 | `kitchendb/seed.py` | First-run seed data (inventory, 28 menu slots, prep tasks, profile). |
 | `kitchendb/validation.py` | Pure input validation / normalization (no DB). |
+| `kitchendb/embeddings.py` | Local embedding model (`fastembed`) + numpy cosine similarity — the semantic half of recipe search. |
+| `kitchendb/keyword_search.py` | SQLite FTS5 query + BM25 normalization — the keyword half of recipe search. |
 | `kitchendb/models.py` | Pydantic request models. |
 | `kitchendb/tools/` | Data operations by domain — each an MCP tool and/or a REST handler. |
 | `kitchendb/routes.py` | The `/api/*` REST surface. |
@@ -184,6 +186,28 @@ Individual household members, each with their own dietary preferences and health
 | `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last write |
 
 `add_household_member`/`update_household_member`/`delete_household_member`/`list_household_members` are REST-only (`/api/household-members`, human-edited on the Profile page, not agent tools). The row is also embedded in `GET /api/dashboard` as `household_members` and folded into `get_household_preferences`.
+
+### `recipes`
+The household recipe catalog. Each row is one recipe, searchable by a hybrid of keyword and semantic matching.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY | Recipe identifier |
+| `name` | TEXT | Recipe name (denormalized copy of `recipe.name`, for fast alphabetical listing) |
+| `recipe` | TEXT | Full structured recipe as JSON: `name`, `origin`, `serves`, `prep_time_minutes`, `cook_time_minutes`, `ingredients` (list of `{item_name, quantity, unit}`, same shape as `detailed_prep_schedule.ingredients_used`), `instructions` (list of plain-text step strings, same convention as `weekly_menu.full_recipe`), `macros_per_serving` (`{calories, protein_g, carbs_g, fat_g, fiber_g}`), `dietary_flags`, `meal_types` (validated against `constants.MEAL_TYPE_SET`), `tags`, `source` |
+| `embedding` | TEXT | JSON array of floats — the recipe's semantic-search vector, built once from its whole text (name + origin + ingredients + instructions + tags, no chunking) by `kitchendb/embeddings.py`. Always recomputed alongside `recipe` by `add_recipe`/`update_recipe`, so it never drifts out of sync with the content it represents. |
+| `rating` | INTEGER (1-5, nullable) | Household preference signal, separate from recipe content — set via `rate_recipe`, never touches `embedding` |
+| `created_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | When added |
+| `updated_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Last edit |
+
+No uniqueness constraint on `name` — a household may keep more than one version of the same dish. `add_recipe`/`update_recipe` reuse existing validation: `normalize_ingredients_used` (`validation.py`) for `ingredients`, `clean_line_list` for `instructions`/`dietary_flags`/`tags`, `validate_meal_type` for `meal_types`.
+
+### `recipes_fts`
+A standalone (not `content=`-linked) SQLite FTS5 virtual table — `name`, `ingredients`, `tags`, `instructions` columns, rowid always equal to the matching `recipes.id`. Kept in sync explicitly by `add_recipe`/`update_recipe`/`delete_recipe`/`reindex_recipes` (no SQL triggers — every other derived column in this schema, e.g. `recipes.embedding`, is synced the same explicit way from Python). This is the keyword half of `search_recipes`; there is no REST/MCP surface of its own.
+
+`search_recipes(query, top_k=5)` combines two independent signals per candidate recipe: a semantic score (query embedded with the same local model, ranked against every row by cosine similarity — `kitchendb/embeddings.cosine_top_k`) and a keyword score (`recipes_fts` queried via FTS5 `MATCH`, BM25 output min-max normalized to `[0, 1]` across the matching rows — `kitchendb/keyword_search.keyword_top_k`). A recipe is only returned if its keyword score **or** its semantic score exceeds `0.7` (`kitchendb.tools.recipes._MATCH_THRESHOLD`); qualifying recipes are ranked by the higher of the two scores. Both are a full re-scan per call, no persistent in-memory index to invalidate; correct and fast enough at catalog scale (tens–hundreds of rows). A query that clears the bar for fewer than `top_k` recipes — including zero — returns exactly that many; results are never padded with weak matches. `reindex_recipes()` (MCP-only, no REST route, same pattern as `expire_stale_prep_tasks`) re-embeds and re-indexes every row — for bulk backfill or an embedding-model upgrade, not the normal write path.
+
+Executive Chef and Sous Chef call `search_recipes` before writing new dish instructions (in chat, the `weekly_menu` job, and prep jobs) and adapt what's found via `get_household_preferences`, rather than inventing from scratch — soft prompt guidance, not a `JOB_REQUIRED_TOOLS` gate. Executive Chef also owns recipe CRUD from chat, including transcribing a household member's pasted recipe text into this structured shape via `add_recipe`.
 
 ## Food Inspector / auditing
 
