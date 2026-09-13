@@ -5,6 +5,7 @@ import AccessGate from './components/AccessGate';
 import Dashboard from './pages/Dashboard';
 import Pantry from './pages/Pantry';
 import WeeklyMenu from './pages/WeeklyMenu';
+import Recipes from './pages/Recipes';
 import TaskList from './pages/TaskList';
 import Chat from './pages/Chat';
 import Automations from './pages/Automations';
@@ -15,6 +16,7 @@ const pageMeta = {
   dashboard: ['Good morning, Alex', 'Your kitchen at a glance'],
   pantry: ['Pantry', 'Keep the good stuff moving'],
   menu: ['Weekly Menu', 'Five days, thoughtfully planned'],
+  recipes: ['Recipes', 'The household catalog'],
   tasks: ['Task List', 'A little prep goes a long way'],
   chat: ['Chat', 'Your Executive Chef is almost ready'],
   automations: ['Automations', 'Run the autonomous agents on demand'],
@@ -64,6 +66,6 @@ export default function App() {
   const firstName = (data.profile?.name || '').trim().split(/\s+/)[0];
   const [rawTitle, eyebrow] = pageMeta[page];
   const title = page === 'dashboard' && firstName ? `Good morning, ${firstName}` : rawTitle;
-  const content = { dashboard: <Dashboard data={data} navigate={setPage} />, pantry: <Pantry data={data} onAddToShopping={addToShopping} onDeleteShoppingItem={deleteShoppingItem} onInvokePantryManager={invokePantryManager} onAcknowledgeShopping={acknowledgeShopping} onRefresh={load} />, menu: <WeeklyMenu data={data} onRefresh={load} />, tasks: <TaskList data={data} onToggle={toggle} onCancel={cancelTask} onRefresh={load} />, chat: <Chat />, automations: <Automations />, profile: <Profile data={data} onSave={saveProfile} onAddMember={addMember} onUpdateMember={updateMember} onDeleteMember={deleteMember} /> }[page];
+  const content = { dashboard: <Dashboard data={data} navigate={setPage} />, pantry: <Pantry data={data} onAddToShopping={addToShopping} onDeleteShoppingItem={deleteShoppingItem} onInvokePantryManager={invokePantryManager} onAcknowledgeShopping={acknowledgeShopping} onRefresh={load} />, menu: <WeeklyMenu data={data} onRefresh={load} />, recipes: <Recipes />, tasks: <TaskList data={data} onToggle={toggle} onCancel={cancelTask} onRefresh={load} />, chat: <Chat />, automations: <Automations />, profile: <Profile data={data} onSave={saveProfile} onAddMember={addMember} onUpdateMember={updateMember} onDeleteMember={deleteMember} /> }[page];
   return <div className="app-shell"><Sidebar page={page} onNavigate={(next) => { setPage(next); setMobileNav(false); }} open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} /><main className="main"><PageHeader title={title} eyebrow={eyebrow} profileName={data.profile?.name} onRefresh={load} onMenu={() => setMobileNav(!mobileNav)} />{error && <div className="error-banner">Could not refresh kitchen data: {error}</div>}{content}</main></div>;
 }

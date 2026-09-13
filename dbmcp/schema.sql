@@ -121,3 +121,31 @@ CREATE TABLE IF NOT EXISTS household_members (
     health_conditions TEXT NOT NULL DEFAULT '[]',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS recipes (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    recipe TEXT NOT NULL,
+    embedding TEXT NOT NULL,
+    rating INTEGER CHECK (rating BETWEEN 1 AND 5),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+-- recipe: the full structured recipe (name, origin, serves, ingredients, instructions,
+-- macros_per_serving, dietary_flags, meal_types, tags, source) as JSON - the single
+-- source of truth for that recipe's content. embedding: a JSON array of floats (one
+-- vector per recipe, built from the whole recipe text - see kitchendb/embeddings.py),
+-- always kept in sync with recipe by add_recipe/update_recipe/reindex_recipes so the
+-- two never drift apart. rating is a separate household preference signal (1-5, human-
+-- or chat-set) that never touches embedding. No uniqueness constraint on name - a
+-- household may keep more than one version of the same dish.
+
+-- Keyword half of search_recipes' hybrid search (see kitchendb/keyword_search.py). A
+-- standalone (not content=-linked) FTS5 table whose rowid is always the matching
+-- recipes.id - kept in sync explicitly by add_recipe/update_recipe/delete_recipe/
+-- reindex_recipes (no SQL triggers; every other write path in this schema is synced
+-- the same explicit way from Python, e.g. the embedding column above).
+CREATE VIRTUAL TABLE IF NOT EXISTS recipes_fts USING fts5(
+    name, ingredients, tags, instructions,
+    tokenize = 'porter unicode61'
+);

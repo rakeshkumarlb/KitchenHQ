@@ -26,3 +26,7 @@ chatui/dist/
 *.db-journal
 data/
 dbmcp/backups/
+
+# Local embedding model cache (baked into the Docker image at build time instead -
+# see dbmcp/Dockerfile; this only appears when running dbmcp outside Docker)
+dbmcp/fastembed_cache/

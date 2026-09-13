@@ -39,4 +39,11 @@ export const kitchenApi = {
   listAutomationJobs: () => request('/automations/jobs'),
   listAutomationRuns: () => request('/automations/runs'),
   invokeAutomation: (jobName) => request(`/automations/invoke/${jobName}`, { method: 'POST' }),
+  listRecipes: (limit, offset = 0) => request(`/recipes?${limit != null ? `limit=${limit}&offset=${offset}` : ''}`),
+  getRecipe: (id) => request(`/recipes/${id}`),
+  searchRecipes: (query, topK = 5) => request(`/recipes/search?q=${encodeURIComponent(query)}&top_k=${topK}`),
+  addRecipe: (recipe) => request('/recipes', { method: 'POST', body: JSON.stringify({ recipe }) }),
+  updateRecipe: (id, recipe) => request(`/recipes/${id}`, { method: 'PUT', body: JSON.stringify({ recipe }) }),
+  deleteRecipe: (id) => request(`/recipes/${id}`, { method: 'DELETE' }),
+  rateRecipe: (id, rating) => request(`/recipes/${id}/rating`, { method: 'PATCH', body: JSON.stringify({ rating }) }),
 };

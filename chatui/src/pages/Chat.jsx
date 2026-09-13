@@ -25,8 +25,14 @@ export default function Chat() {
 	const [recent, setRecent] = useState([]);
 	const [showHistory, setShowHistory] = useState(false);
 	const inputRef = useRef(null);
+	const scrollRef = useRef(null);
 
 	useEffect(() => inputRef.current?.focus(), []);
+
+	useEffect(() => {
+		const el = scrollRef.current;
+		if (el) el.scrollTop = el.scrollHeight;
+	}, [messages, sending]);
 
 	const loadRecent = async () => {
 		try { setRecent(await kitchenApi.listChatSessions()); } catch { /* history is a convenience, not critical */ }
@@ -89,13 +95,15 @@ export default function Chat() {
 				<span className="chat-history-time">{entry.updated_at}</span>
 			</button>) : <div className="empty-state">No previous conversations yet.</div>}
 		</section>}
-		<div className="chat-placeholder">
-			<div className="chat-orb"><Bot size={30} /></div>
-			<p className="eyebrow">Your kitchen intelligence</p>
-			<h2>Chat with your<br /><em>Executive Chef.</em></h2>
-			{!messages.length && <p className="chat-copy">Ask about recipes, substitutions, meal plans, or how to use what is already in your pantry.</p>}
-		</div>
-		{messages.length > 0 && <section className="chat-transcript" aria-live="polite">{messages.map((item, index) => <article className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === 'assistant' ? 'Executive Chef' : 'You'}</span><p>{item.content}</p></article>)}{sending && <div className="chat-message assistant"><span>Executive Chef</span><p className="chat-thinking"><LoaderCircle size={15} /> Thinking...</p></div>}</section>}
+		<section className="chat-scroll soft-inset" ref={scrollRef}>
+			{!messages.length && <div className="chat-placeholder">
+				<div className="chat-orb"><Bot size={30} /></div>
+				<p className="eyebrow">Your kitchen intelligence</p>
+				<h2>Chat with your <em>Executive Chef.</em></h2>
+				<p className="chat-copy">Ask about recipes, substitutions, meal plans, or how to use what is already in your pantry.</p>
+			</div>}
+			{messages.length > 0 && <div className="chat-transcript" aria-live="polite">{messages.map((item, index) => <article className={`chat-message ${item.role}`} key={`${item.role}-${index}`}><span>{item.role === 'assistant' ? 'Executive Chef' : 'You'}</span><p>{item.content}</p></article>)}{sending && <div className="chat-message assistant"><span>Executive Chef</span><p className="chat-thinking"><LoaderCircle size={15} /> Thinking...</p></div>}</div>}
+		</section>
 		{error && <div className="chat-error" role="alert"><span>{error}</span><button type="button" onClick={() => setError('')} aria-label="Dismiss error"><RotateCcw size={15} /></button></div>}
 		<form className="chat-composer soft-inset" onSubmit={send}><input ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask anything about your kitchen..." maxLength={4000} aria-label="Message Executive Chef" disabled={sending} /><button type="submit" disabled={!draft.trim() || sending} aria-label="Send message">{sending ? <LoaderCircle className="spin" size={18} /> : <ArrowUp size={18} />}</button></form>
 	</div>;

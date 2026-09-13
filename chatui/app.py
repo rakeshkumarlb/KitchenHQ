@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from uuid import UUID, uuid4
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -145,6 +146,42 @@ async def complete_task(task_id: int, payload: dict) -> dict:
 @app.post("/api/prep-schedule/{task_id}/cancel")
 async def cancel_task(task_id: int, payload: dict | None = None) -> dict:
     return await db_request("POST", f"/api/prep-schedule/{task_id}/cancel", payload or {})
+
+
+@app.get("/api/recipes")
+async def list_recipes(limit: int | None = None, offset: int = 0) -> list[dict]:
+    params = f"?limit={limit}&offset={offset}" if limit is not None else ""
+    return await db_request("GET", f"/api/recipes{params}")
+
+
+@app.get("/api/recipes/search")
+async def search_recipes(q: str, top_k: int = 5) -> list[dict]:
+    return await db_request("GET", f"/api/recipes/search?q={quote(q)}&top_k={top_k}")
+
+
+@app.get("/api/recipes/{recipe_id}")
+async def get_recipe(recipe_id: int) -> dict:
+    return await db_request("GET", f"/api/recipes/{recipe_id}")
+
+
+@app.post("/api/recipes")
+async def add_recipe(payload: dict) -> dict:
+    return await db_request("POST", "/api/recipes", payload)
+
+
+@app.put("/api/recipes/{recipe_id}")
+async def update_recipe(recipe_id: int, payload: dict) -> dict:
+    return await db_request("PUT", f"/api/recipes/{recipe_id}", payload)
+
+
+@app.delete("/api/recipes/{recipe_id}")
+async def delete_recipe(recipe_id: int) -> dict:
+    return await db_request("DELETE", f"/api/recipes/{recipe_id}")
+
+
+@app.patch("/api/recipes/{recipe_id}/rating")
+async def rate_recipe(recipe_id: int, payload: dict) -> dict:
+    return await db_request("PATCH", f"/api/recipes/{recipe_id}/rating", payload)
 
 
 @app.post("/api/chat", response_model=ChatResponse)
