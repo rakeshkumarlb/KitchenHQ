@@ -1,22 +1,41 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Plus, Search, Star, Trash2, X } from 'lucide-react';
+import { BookOpen, LoaderCircle, RefreshCw, Search, ShieldCheck, Star, Trash2, Wand2, X } from 'lucide-react';
 import { kitchenApi } from '../services/api';
 import { formatIngredientLine, parseIngredientsUsed } from '../services/menuContent';
 
-const MEAL_TYPES = ['breakfast', 'lunch', 'snack', 'dinner'];
 const TOP_LIST_SIZE = 10;
+const TAG_PREVIEW_COUNT = 3;
+const CHAT_SESSION_KEY = 'kitchenhq.chat.session';
 
-const emptyForm = {
-  name: '', origin: '', serves: '4', prep_time_minutes: '', cook_time_minutes: '',
-  ingredientsText: '', instructionsText: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', fiber_g: '',
-  dietary_flags: '', meal_types: [], tags: '',
-};
+// Same localStorage key Chat.jsx keys its session on, so an "ask chef" round-trip from
+// here also lands in that page's chat history rather than starting a shadow session.
+function chatSessionId() {
+  const saved = window.localStorage.getItem(CHAT_SESSION_KEY);
+  if (saved) return saved;
+  const sessionId = crypto.randomUUID();
+  window.localStorage.setItem(CHAT_SESSION_KEY, sessionId);
+  return sessionId;
+}
 
-function parseIngredientLines(text) {
-  return text.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
-    const [name, quantity, unit] = line.split(',').map((part) => part.trim());
-    return { item_name: name, quantity: Number(quantity) || 1, unit: unit || 'pcs' };
-  });
+function scoreClass(score) {
+  if (score == null) return 'unaudited';
+  if (score >= 80) return 'good';
+  if (score >= 50) return 'fair';
+  return 'poor';
+}
+
+function AuditBadge({ score }) {
+  return <span className={`audit-badge ${scoreClass(score)}`}><ShieldCheck size={12} /> {score == null ? 'Unaudited' : `Score ${score}/100`}</span>;
+}
+
+function TagChips({ tags }) {
+  if (!tags?.length) return <span className="tag-chip muted">No tags yet</span>;
+  const shown = tags.slice(0, TAG_PREVIEW_COUNT);
+  const rest = tags.length - shown.length;
+  return <div className="tag-chip-row">
+    {shown.map((tag) => <span className="tag-chip" key={tag}>{tag}</span>)}
+    {rest > 0 && <span className="tag-chip muted">+{rest}</span>}
+  </div>;
 }
 
 function StarRating({ value, onRate }) {
@@ -25,7 +44,20 @@ function StarRating({ value, onRate }) {
   </div>;
 }
 
-function RecipeDetail({ item, onClose, onRate }) {
+function AskChefActions({ item, asking, onAsk }) {
+  const busyTags = asking === `${item.id}:tags`;
+  const busyInstructions = asking === `${item.id}:instructions`;
+  return <div className="ask-chef-actions">
+    <button type="button" className="recipe-button" disabled={Boolean(asking)} onClick={() => onAsk(item, 'tags')}>
+      {busyTags ? <LoaderCircle className="spin" size={14} /> : <Wand2 size={14} />} Identify tags
+    </button>
+    <button type="button" className="recipe-button" disabled={Boolean(asking)} onClick={() => onAsk(item, 'instructions')}>
+      {busyInstructions ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Recreate instructions
+    </button>
+  </div>;
+}
+
+function RecipeDetail({ item, onClose, onRate, asking, onAsk, askReply }) {
   if (!item) return null;
   const recipe = item.recipe;
   const ingredients = parseIngredientsUsed(recipe.ingredients);
@@ -40,7 +72,7 @@ function RecipeDetail({ item, onClose, onRate }) {
         {recipe.prep_time_minutes ? <span>Prep {recipe.prep_time_minutes} min</span> : null}
         {recipe.cook_time_minutes ? <span>Cook {recipe.cook_time_minutes} min</span> : null}
         {macros.calories ? <span>{macros.calories} kcal / serving</span> : null}
-        {(recipe.dietary_flags || []).map((flag) => <span key={flag}>{flag}</span>)}
+        {(recipe.tags || []).map((tag) => <span key={tag}>{tag}</span>)}
       </div>
       <div className="recipe-section"><h3>Ingredients</h3>{ingredients.length
         ? <ul className="recipe-list">{ingredients.map((ing, index) => <li key={`${ing.item_name}-${index}`}>{formatIngredientLine(ing)}</li>)}</ul>
@@ -48,6 +80,16 @@ function RecipeDetail({ item, onClose, onRate }) {
       <div className="recipe-section"><h3>Method</h3>{(recipe.instructions || []).length
         ? <ol className="recipe-list">{recipe.instructions.map((step, index) => <li key={index}>{step}</li>)}</ol>
         : <p>No steps listed.</p>}</div>
+      <div className="recipe-section">
+        <h3>Food Inspector audit</h3>
+        <AuditBadge score={item.score} />
+        <p>{item.audit_feedback || 'Not yet reviewed by the Food Inspector.'}</p>
+      </div>
+      <div className="recipe-section">
+        <h3>Ask the Executive Chef</h3>
+        <AskChefActions item={item} asking={asking} onAsk={onAsk} />
+        {askReply && <p className="automation-result">{askReply}</p>}
+      </div>
     </section>
   </div>;
 }
@@ -59,8 +101,8 @@ export default function Recipes() {
   const [query, setQuery] = useState('');
   const [searched, setSearched] = useState(false);
   const [selected, setSelected] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState(emptyForm);
+  const [asking, setAsking] = useState('');
+  const [askReplies, setAskReplies] = useState({});
 
   const loadTop = async () => {
     setLoading(true);
@@ -96,48 +138,26 @@ export default function Recipes() {
     catch (requestError) { setError(requestError.message); }
   };
 
-  const toggleMealType = (mealType) => setForm((current) => ({
-    ...current,
-    meal_types: current.meal_types.includes(mealType) ? current.meal_types.filter((m) => m !== mealType) : [...current.meal_types, mealType],
-  }));
-
-  const canSubmit = form.name.trim() && form.ingredientsText.trim() && form.instructionsText.trim();
-
-  const submitForm = async (event) => {
-    event.preventDefault();
-    if (!canSubmit) return;
-    const recipe = {
-      name: form.name.trim(),
-      origin: form.origin.trim(),
-      serves: Number(form.serves) || 1,
-      prep_time_minutes: form.prep_time_minutes ? Number(form.prep_time_minutes) : null,
-      cook_time_minutes: form.cook_time_minutes ? Number(form.cook_time_minutes) : null,
-      ingredients: parseIngredientLines(form.ingredientsText),
-      instructions: form.instructionsText.split('\n').map((line) => line.trim()).filter(Boolean),
-      macros_per_serving: {
-        calories: Number(form.calories) || undefined,
-        protein_g: Number(form.protein_g) || undefined,
-        carbs_g: Number(form.carbs_g) || undefined,
-        fat_g: Number(form.fat_g) || undefined,
-        fiber_g: Number(form.fiber_g) || undefined,
-      },
-      dietary_flags: form.dietary_flags.split(',').map((s) => s.trim()).filter(Boolean),
-      meal_types: form.meal_types,
-      tags: form.tags.split(',').map((s) => s.trim()).filter(Boolean),
-    };
+  const askChef = async (item, kind) => {
+    const askKey = `${item.id}:${kind}`;
+    const message = kind === 'tags'
+      ? `Please review recipe #${item.id} ("${item.recipe.name}") in the catalog and refresh its tags per the recipe catalog standards, changing nothing else. Reply in one short sentence with what changed.`
+      : `Please review recipe #${item.id} ("${item.recipe.name}") in the catalog and rewrite its instructions for clarity and correctness, keeping the dish and its ingredients the same unless something is clearly wrong. Reply in one short sentence with what changed.`;
+    setAsking(askKey);
+    setError('');
     try {
-      setError('');
-      await kitchenApi.addRecipe(recipe);
-      setForm(emptyForm);
-      setShowForm(false);
-      await loadTop();
+      const response = await kitchenApi.chat(message, chatSessionId());
+      setAskReplies((current) => ({ ...current, [item.id]: response.reply }));
+      const refreshed = await kitchenApi.getRecipe(item.id);
+      setRecipes((current) => current.map((r) => (r.id === item.id ? refreshed : r)));
+      setSelected((current) => (current && current.id === item.id ? refreshed : current));
     } catch (requestError) { setError(requestError.message); }
+    finally { setAsking(''); }
   };
 
   return <div className="page-content">
     <div className="page-lead">
-      <div><p className="eyebrow">The household catalog</p><h2>Recipe <em>catalog.</em></h2><p>Search by ingredient or vibe, or add your own recipes for the chefs to draw from.</p></div>
-      <div className="page-lead-actions"><button className="secondary-button" onClick={() => setShowForm((v) => !v)}><Plus size={16} /> {showForm ? 'Close' : 'Add recipe'}</button></div>
+      <div><p className="eyebrow">The household catalog</p><h2>Recipe <em>catalog.</em></h2><p>Search by ingredient or vibe. Paste a recipe to the Executive Chef in chat to add it here.</p></div>
     </div>
 
     {error && <div className="chat-error" role="alert"><span>{error}</span></div>}
@@ -148,57 +168,41 @@ export default function Recipes() {
       {searched && <button type="button" className="secondary-button" onClick={clearSearch}><X size={15} /> Clear</button>}
     </form>
 
-    {showForm && <form className="recipe-form soft-outset" onSubmit={submitForm}>
-      <div className="recipe-form-row">
-        <input type="text" placeholder="Recipe name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} aria-label="Recipe name" />
-        <input type="text" placeholder="Origin (e.g. North Indian)" value={form.origin} onChange={(event) => setForm({ ...form, origin: event.target.value })} aria-label="Origin" />
-        <input type="number" min="1" placeholder="Serves" value={form.serves} onChange={(event) => setForm({ ...form, serves: event.target.value })} aria-label="Serves" />
-      </div>
-      <div className="recipe-form-row">
-        <input type="number" min="0" placeholder="Prep time (min)" value={form.prep_time_minutes} onChange={(event) => setForm({ ...form, prep_time_minutes: event.target.value })} aria-label="Prep time in minutes" />
-        <input type="number" min="0" placeholder="Cook time (min)" value={form.cook_time_minutes} onChange={(event) => setForm({ ...form, cook_time_minutes: event.target.value })} aria-label="Cook time in minutes" />
-      </div>
-      <textarea placeholder="Ingredients, one per line: item name, quantity, unit&#10;e.g. Paneer, 250, g" value={form.ingredientsText} onChange={(event) => setForm({ ...form, ingredientsText: event.target.value })} aria-label="Ingredients" />
-      <textarea placeholder="Instructions, one step per line" value={form.instructionsText} onChange={(event) => setForm({ ...form, instructionsText: event.target.value })} aria-label="Instructions" />
-      <div className="recipe-form-row">
-        <input type="number" min="0" placeholder="Calories/serving" value={form.calories} onChange={(event) => setForm({ ...form, calories: event.target.value })} aria-label="Calories per serving" />
-        <input type="number" min="0" placeholder="Protein (g)" value={form.protein_g} onChange={(event) => setForm({ ...form, protein_g: event.target.value })} aria-label="Protein grams" />
-        <input type="number" min="0" placeholder="Carbs (g)" value={form.carbs_g} onChange={(event) => setForm({ ...form, carbs_g: event.target.value })} aria-label="Carbs grams" />
-        <input type="number" min="0" placeholder="Fat (g)" value={form.fat_g} onChange={(event) => setForm({ ...form, fat_g: event.target.value })} aria-label="Fat grams" />
-      </div>
-      <div className="recipe-form-row">
-        <input type="text" placeholder="Dietary flags, comma separated" value={form.dietary_flags} onChange={(event) => setForm({ ...form, dietary_flags: event.target.value })} aria-label="Dietary flags" />
-        <input type="text" placeholder="Tags, comma separated" value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} aria-label="Tags" />
-      </div>
-      <div className="recipe-form-checks">{MEAL_TYPES.map((mealType) => <label key={mealType}><input type="checkbox" checked={form.meal_types.includes(mealType)} onChange={() => toggleMealType(mealType)} /> {mealType}</label>)}</div>
-      <button type="submit" className="shopping-confirm" disabled={!canSubmit}><Plus size={15} /> Save recipe</button>
-    </form>}
-
     <section className="table-section">
       <div className="section-heading compact"><h3>{searched ? `Results for "${query}"` : 'Top recipes'}</h3><span>{recipes.length} shown</span></div>
-      {loading ? <div className="empty-state">Loading…</div> : recipes.length ? <div className="recipe-catalog-grid">
+      {loading ? <div className="empty-state">Loading…</div> : recipes.length ? <div className="recipe-catalog-list soft-outset">
         {recipes.map((item) => {
           const recipe = item.recipe;
-          const macros = recipe.macros_per_serving || {};
-          return <article className="recipe-catalog-card soft-outset" key={item.id}>
-            <div className="recipe-catalog-card-top"><span className="meal-type">{recipe.origin || 'Household'}</span>{item.score !== undefined && <span className="automation-job-agent">match {(item.score * 100).toFixed(0)}%</span>}</div>
-            <h3>{recipe.name}</h3>
-            <div className="recipe-catalog-card-meta">
-              <span>Serves {recipe.serves || 1}</span>
-              {recipe.prep_time_minutes ? <span>Prep {recipe.prep_time_minutes}m</span> : null}
-              {recipe.cook_time_minutes ? <span>Cook {recipe.cook_time_minutes}m</span> : null}
-              {macros.calories ? <span>{macros.calories} kcal</span> : null}
+          return <div key={item.id}>
+            <div className="recipe-row">
+              <div className="recipe-row-name">
+                <b>{recipe.name}</b>
+                <small>{recipe.origin || 'Household'} · serves {recipe.serves || 1}</small>
+                <TagChips tags={recipe.tags} />
+              </div>
+              <div className="recipe-row-meta">
+                <StarRating value={item.rating || 0} onRate={(rating) => rate(item.id, rating)} />
+              </div>
+              <AuditBadge score={item.score} />
+              <div className="recipe-row-actions">
+                {searched && item.match_score !== undefined && <span className="automation-job-agent">match {(item.match_score * 100).toFixed(0)}%</span>}
+                <button className="recipe-button" onClick={() => setSelected(item)}><BookOpen size={14} /> View</button>
+                <button className="task-cancel" onClick={() => remove(item.id)} aria-label={`Delete ${recipe.name}`} title="Remove from catalog"><Trash2 size={14} /></button>
+              </div>
             </div>
-            <StarRating value={item.rating || 0} onRate={(rating) => rate(item.id, rating)} />
-            <div className="recipe-catalog-card-actions">
-              <button className="recipe-button" onClick={() => setSelected(item)}><BookOpen size={14} /> View recipe</button>
-              <button className="task-cancel" onClick={() => remove(item.id)} aria-label={`Delete ${recipe.name}`} title="Remove from catalog"><Trash2 size={14} /></button>
-            </div>
-          </article>;
+            {askReplies[item.id] && <p className="automation-result recipe-row-result">{askReplies[item.id]}</p>}
+          </div>;
         })}
-      </div> : <div className="empty-state">{searched ? 'No recipes matched that search.' : 'No recipes yet — add the first one above.'}</div>}
+      </div> : <div className="empty-state">{searched ? 'No recipes matched that search.' : 'No recipes yet — paste one to the Executive Chef in chat to get started.'}</div>}
     </section>
 
-    <RecipeDetail item={selected} onClose={() => setSelected(null)} onRate={rate} />
+    <RecipeDetail
+      item={selected}
+      onClose={() => setSelected(null)}
+      onRate={rate}
+      asking={asking}
+      onAsk={askChef}
+      askReply={selected ? askReplies[selected.id] : undefined}
+    />
   </div>;
 }

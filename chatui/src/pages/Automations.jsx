@@ -72,6 +72,14 @@ const JOB_META = {
 		frequency: 'daily',
 		time: '22:45',
 	},
+	recipe_audit: {
+		label: 'Recipe audit',
+		agent: 'Food Inspector',
+		description: 'Scores every not-yet-audited recipe against the household recipe catalog standards (tags, instructions), with written feedback.',
+		schedule: 'Daily, 23:00',
+		frequency: 'daily',
+		time: '23:00',
+	},
 	expire_prep_tasks: {
 		label: 'Task expiry sweep',
 		agent: 'Sous Chef',

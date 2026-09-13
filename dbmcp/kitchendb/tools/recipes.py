@@ -24,7 +24,7 @@ from ..validation import clean_line_list, normalize_ingredients_used
 # A recipe qualifies for search_recipes' results if its keyword score OR its semantic
 # score clears this bar; neither is required to be exact, but a recipe both signals
 # consider a weak match is left out rather than padding top_k with noise.
-_MATCH_THRESHOLD = 0.5
+_MATCH_THRESHOLD = 0.65
 
 
 def _validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
@@ -41,8 +41,10 @@ def _validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         if normalized not in MEAL_TYPE_SET:
             raise ValueError(f"meal_types must each be one of {sorted(MEAL_TYPE_SET)}")
         meal_types.append(normalized)
-    dietary_flags = clean_line_list(recipe.get("dietary_flags", []), field="dietary_flags", required=False)
-    tags = clean_line_list(recipe.get("tags", []), field="tags", required=False)
+    # dietary_flags is no longer a stored field - tags is the one place diet/allergen/
+    # nutrition labels live (see the household's recipe catalog standards). Accepted here
+    # as a tolerated input alias so an old-shaped call still works, merged straight in.
+    tags = clean_line_list([*recipe.get("tags", []), *recipe.get("dietary_flags", [])], field="tags", required=False)
     serves = int(recipe.get("serves") or 1)
     if serves < 1:
         raise ValueError("recipe.serves must be at least 1")
@@ -55,7 +57,6 @@ def _validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         "ingredients": ingredients,
         "instructions": instructions,
         "macros_per_serving": recipe.get("macros_per_serving") or {},
-        "dietary_flags": dietary_flags,
         "meal_types": meal_types,
         "tags": tags,
         "source": str(recipe.get("source", "household")).strip() or "household",
@@ -68,6 +69,8 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         "name": row["name"],
         "recipe": json.loads(row["recipe"]),
         "rating": row["rating"],
+        "score": row["score"],
+        "audit_feedback": row["audit_feedback"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -79,10 +82,22 @@ def add_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
 
     `recipe` is the full structured recipe: name, origin, serves, prep_time_minutes,
     cook_time_minutes, ingredients ([{item_name, quantity, unit}]), instructions
-    (ordered plain-text steps), macros_per_serving, dietary_flags, meal_types (each one
-    of "breakfast"/"lunch"/"snack"/"dinner"), tags, source. Its embedding is computed
+    (ordered plain-text steps), macros_per_serving, meal_types (each one of
+    "breakfast"/"lunch"/"snack"/"dinner"), tags, source. Its embedding is computed
     automatically from the whole recipe text, so it's searchable via search_recipes
     immediately.
+
+    tags is the one field for every reusable, searchable fact about this dish that
+    isn't already a dedicated field - diet category (exactly one explicit tag from the
+    mutually exclusive pair "Vegetarian" or "Non-Vegetarian" - never both on the same
+    recipe, never neither, never left to be inferred from the other's absence - plus
+    "Egg"/"Vegan"/"Eggetarian" layered on top where genuinely relevant), allergen/
+    restriction labels ("Dairy-Free", "Gluten-Free"), and nutrition character
+    ("High-Protein", "High-Fibre", "Low-Calorie") when the macros support it. Use your
+    best judgement from the ingredients/instructions - see the household's recipe
+    catalog standards (your instructions) for the full list. A recipe's tags/
+    instructions get judged by the Food Inspector after every save, independent of any
+    household's preferences - the catalog is a general-purpose reference.
     """
     validated = _validate_recipe(recipe)
     vector = embed_text(embedding_text_for(validated))
@@ -101,13 +116,18 @@ def add_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
 
 @tool
 def update_recipe(recipe_id: int, recipe: dict[str, Any]) -> dict[str, Any]:
-    """Replace a recipe's content (same shape as add_recipe) and recompute its embedding."""
+    """Replace a recipe's content (same shape as add_recipe) and recompute its embedding.
+
+    Resets score/audit_feedback to NULL - a changed recipe is a new decision awaiting the
+    Food Inspector's judgement, same convention as add_weekly_menu_item.
+    """
     validated = _validate_recipe(recipe)
     vector = embed_text(embedding_text_for(validated))
     name, ingredients_text, tags_text, instructions_text = fts_fields_for(validated)
     with connect() as connection:
         cursor = connection.execute(
-            "UPDATE recipes SET name = ?, recipe = ?, embedding = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE recipes SET name = ?, recipe = ?, embedding = ?, score = NULL, audit_feedback = NULL, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (validated["name"], json.dumps(validated), json.dumps(vector), recipe_id),
         )
         if cursor.rowcount == 0:
@@ -165,13 +185,13 @@ def rate_recipe(recipe_id: int, rating: int) -> dict[str, Any]:
 
 
 @tool
-def search_recipes(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+def search_recipes(query: str, top_k: int = 10) -> list[dict[str, Any]]:
     """Hybrid keyword + semantic search of the recipe catalog for dishes matching `query`.
 
     Call this before writing new dish instructions (in chat, weekly-menu planning, or
     prep tasks) and adapt whatever comes back to the household's preferences, rather
     than inventing a dish unaided. A recipe is only returned if its keyword match score
-    or its semantic match score clears _MATCH_THRESHOLD (currently 0.7) - the two are
+    or its semantic match score clears _MATCH_THRESHOLD (currently 0.65) - the two are
     independent signals (typo/synonym-tolerant embedding similarity vs. exact-term BM25),
     and either one being confident is enough. Ranked recipes are ordered by the higher of
     the two scores, capped at top_k; a weak field (nothing clears the bar) returns fewer
@@ -197,9 +217,12 @@ def search_recipes(query: str, top_k: int = 5) -> list[dict[str, Any]]:
     qualifying.sort(key=lambda pair: pair[1], reverse=True)
 
     results = []
-    for recipe_id, score in qualifying[:top_k]:
+    for recipe_id, match_score in qualifying[:top_k]:
         entry = _row_to_dict(by_id[recipe_id])
-        entry["score"] = score
+        # match_score (this query's confidence, 0-1) is a different axis from the row's
+        # own `score` (the Food Inspector's 0-100 audit judgement) - kept as separate
+        # keys so a search result never clobbers the recipe's audit state.
+        entry["match_score"] = match_score
         results.append(entry)
     return results
 

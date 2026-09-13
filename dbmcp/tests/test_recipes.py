@@ -18,9 +18,8 @@ _SAMPLE_RECIPE = {
     "ingredients": [{"item_name": "paneer", "quantity": 250, "unit": "g"}],
     "instructions": ["Cube the paneer.", "Heat oil and simmer the gravy."],
     "macros_per_serving": {"calories": 320, "protein_g": 14},
-    "dietary_flags": ["vegetarian"],
     "meal_types": ["lunch", "dinner"],
-    "tags": ["curry"],
+    "tags": ["curry", "Vegetarian"],
 }
 
 
@@ -61,6 +60,8 @@ def test_recipe_crud_round_trip(client):
     assert added["name"] == "Paneer Butter Masala"
     assert added["recipe"]["ingredients"] == [{"item_name": "paneer", "quantity": 250.0, "unit": "g"}]
     assert added["rating"] is None
+    assert added["score"] is None
+    assert "dietary_flags" not in added["recipe"]
 
     fetched = client.get(f"/api/recipes/{added['id']}").json()
     assert fetched["recipe"]["instructions"] == _SAMPLE_RECIPE["instructions"]
@@ -75,6 +76,29 @@ def test_recipe_crud_round_trip(client):
     deleted = client.delete(f"/api/recipes/{added['id']}").json()
     assert deleted == {"deleted": True, "id": added["id"]}
     assert client.get(f"/api/recipes/{added['id']}").status_code == 400
+
+
+def test_dietary_flags_input_is_merged_into_tags(client):
+    added = client.post("/api/recipes", json={"recipe": {
+        **_SAMPLE_RECIPE, "tags": ["curry"], "dietary_flags": ["Non-Vegetarian"],
+    }}).json()
+    assert "dietary_flags" not in added["recipe"]
+    assert "Non-Vegetarian" in added["recipe"]["tags"]
+
+
+def test_update_recipe_resets_audit_score(client):
+    from kitchendb.tools.audit import record_recipe_audit
+
+    added = client.post("/api/recipes", json={"recipe": _SAMPLE_RECIPE}).json()
+    record_recipe_audit(added["id"], 90, "Tags are accurate and complete.")
+
+    audited = client.get(f"/api/recipes/{added['id']}").json()
+    assert audited["score"] == 90
+    assert audited["audit_feedback"] == "Tags are accurate and complete."
+
+    updated = client.put(f"/api/recipes/{added['id']}", json={"recipe": _SAMPLE_RECIPE}).json()
+    assert updated["score"] is None
+    assert updated["audit_feedback"] is None
 
 
 def test_search_recipes_ranks_relevant_first(client):
@@ -92,7 +116,7 @@ def test_search_recipes_ranks_relevant_first(client):
     # filtered out, not just ranked second, since neither of its signals clears 70%.
     results = client.get("/api/recipes/search", params={"q": "Paneer Butter Masala", "top_k": 5}).json()
     assert [row["id"] for row in results] == [veg["id"]]
-    assert results[0]["score"] > 0.7
+    assert results[0]["match_score"] > 0.7
 
 
 def test_search_recipes_excludes_weak_matches_entirely(client):

@@ -15,12 +15,25 @@ from typing import Any
 
 
 def fts_fields_for(recipe: dict[str, Any]) -> tuple[str, str, str, str]:
-    """Build the (name, ingredients, tags, instructions) text for a recipe_fts row."""
+    """Build the (name, ingredients, tags, instructions) text for a recipe_fts row.
+
+    The fts5 table has a fixed 4-column shape, so category-style fields that aren't
+    "tags" in the schema (meal_types, origin, source) are folded into the tags column
+    text - they're still categorical/descriptive labels, just stored under a different
+    recipe field name, and this is what makes them MATCH-able at all. Diet/allergen/
+    nutrition labels live directly in tags itself (see the recipe catalog standards).
+    """
     ingredient_names = ", ".join(str(item.get("item_name", "")) for item in recipe.get("ingredients", []))
+    tags_text = ", ".join([
+        *recipe.get("tags", []),
+        *recipe.get("meal_types", []),
+        str(recipe.get("origin", "")),
+        str(recipe.get("source", "")),
+    ])
     return (
         str(recipe.get("name", "")),
         ingredient_names,
-        ", ".join(recipe.get("tags", [])),
+        tags_text,
         " ".join(recipe.get("instructions", [])),
     )
 

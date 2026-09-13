@@ -276,7 +276,7 @@ def api_delete_household_member(member_id: int) -> dict[str, Any]:
 
 
 @router.get("/api/recipes/search")
-def api_search_recipes(q: str, top_k: int = 5) -> list[dict[str, Any]]:
+def api_search_recipes(q: str, top_k: int = 10) -> list[dict[str, Any]]:
     try:
         return search_recipes(q, top_k)
     except ValueError as error:

@@ -55,20 +55,26 @@ PURPOSE: judge every weekly_menu row not yet scored against the same rules and p
 1. Call get_job_context.
 2. Call get_household_preferences so you judge against the same chef note, favourites, and household members' preferences/conditions the Executive Chef had.
 3. Call get_unaudited_weekly_menu_items. If it returns nothing, there is nothing to audit this run - say so and stop.
-4. For every row returned, judge it against the dietary/macro rules (lunches vegetarian with no egg/meat/fish, chicken dinner-only, etc.) and the household context from step 2, then call record_weekly_menu_audit(weekly_menu_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
+4. For every row returned, judge it against the dietary/macro rules (lunches vegetarian with no egg/meat/fish, chicken dinner-only, etc.) and the household context from step 2 - including whether the ingredient quantities look scaled for the household (household_members count) and whether the dish/instructions were actually adapted to a member's preference or health condition, not just nutritionally fine in general - then call record_weekly_menu_audit(weekly_menu_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
 5. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
     "task_audit": """\
 PURPOSE: judge every detailed_prep_schedule row not yet scored against the same rules and preferences the Sous Chef used.
 1. Call get_job_context.
 2. Call get_household_preferences so you judge against the same household context the Sous Chef had.
 3. Call get_unaudited_prep_tasks. If it returns nothing, there is nothing to audit this run - say so and stop.
-4. For every row returned (including cancelled ones - you are judging the decision, not whether it was performed), judge the instructions and ingredients_used against the dietary rules and household context from step 2, then call record_prep_task_audit(prep_schedule_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
+4. For every row returned (including cancelled ones - you are judging the decision, not whether it was performed), judge the instructions and ingredients_used against the dietary rules and household context from step 2 - including whether ingredients_used quantities look scaled for the household and whether the instructions genuinely reflect a member's preference or health condition - then call record_prep_task_audit(prep_schedule_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
 5. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
     "expire_prep_tasks": """\
 PURPOSE: housekeeping sweep - expire any prep task a human never acknowledged or cancelled within its 2-hour action window, so stale tasks stop cluttering the task list.
 1. Call get_job_context.
 2. Call expire_stale_prep_tasks (no arguments) - it finds every detailed_prep_schedule row still 'assigned' with created_at more than 2 hours ago and marks each one 'expired'. It never touches inventory.
 3. Reply with a one-sentence summary of how many tasks (if any) were expired, using the tool's returned expired_ids.""",
+    "recipe_audit": """\
+PURPOSE: judge every recipe catalog row not yet scored against the recipe catalog standards, independent of any household's preferences.
+1. Call get_job_context.
+2. Call get_unaudited_recipes. If it returns nothing, there is nothing to audit this run - say so and stop. Do NOT call get_household_preferences for this job - a catalog recipe is a general-purpose reference, not a plan for a specific household, so it is judged only against the recipe catalog standards below.
+3. For every row returned, judge its tags and instructions against the recipe catalog standards: diet category must carry exactly one explicit tag from the mutually exclusive pair "Vegetarian"/"Non-Vegetarian" (never both on the same recipe, never neither), allergen/nutrition labels the ingredients/macros actually support, and clear, ordered, complete instructions. Then call record_recipe_audit(recipe_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what tag or instruction issue it falls short on. Do this for every row from step 2; do not stop partway.
+4. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
 }
 
 JOB_ROLES = {
@@ -81,6 +87,7 @@ JOB_ROLES = {
     "menu_audit": "food_inspector",
     "task_audit": "food_inspector",
     "expire_prep_tasks": "sous_chef",
+    "recipe_audit": "food_inspector",
 }
 
 # Structured result each job returns. Passed explicitly to run_agent so the weekly_menu
@@ -95,6 +102,7 @@ JOB_RESULT_MODELS = {
     "menu_audit": FoodInspectorResult,
     "task_audit": FoodInspectorResult,
     "expire_prep_tasks": SousChefResult,
+    "recipe_audit": FoodInspectorResult,
 }
 
 # The DB write(s) each job exists to make. If the model stops short, run_agent sends
@@ -116,6 +124,7 @@ JOB_REQUIRED_TOOLS = {
     "menu_audit": ["get_unaudited_weekly_menu_items"],
     "task_audit": ["get_unaudited_prep_tasks"],
     "expire_prep_tasks": ["expire_stale_prep_tasks"],
+    "recipe_audit": ["get_unaudited_recipes"],
 }
 
 JOB_REQUIRED_TOOL_COUNTS = {

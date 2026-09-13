@@ -19,13 +19,6 @@ CREATE TABLE IF NOT EXISTS inventory (
 -- even when tracked stock is already at/near zero, so a balance may go negative and
 -- stay visible until a shopping run tops it back up.
 
-CREATE TABLE IF NOT EXISTS wastage_log (
-    id INTEGER PRIMARY KEY,
-    item_name TEXT NOT NULL,
-    quantity_wasted REAL NOT NULL CHECK (quantity_wasted > 0),
-    date_logged DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS weekly_menu (
     id INTEGER PRIMARY KEY,
     day_of_week TEXT NOT NULL,
@@ -128,16 +121,22 @@ CREATE TABLE IF NOT EXISTS recipes (
     recipe TEXT NOT NULL,
     embedding TEXT NOT NULL,
     rating INTEGER CHECK (rating BETWEEN 1 AND 5),
+    score INTEGER CHECK (score BETWEEN 0 AND 100),
+    audit_feedback TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 -- recipe: the full structured recipe (name, origin, serves, ingredients, instructions,
--- macros_per_serving, dietary_flags, meal_types, tags, source) as JSON - the single
--- source of truth for that recipe's content. embedding: a JSON array of floats (one
+-- macros_per_serving, meal_types, tags, source) as JSON - the single source of truth for
+-- that recipe's content. tags carries every descriptive label (diet category, allergen/
+-- restriction, nutrition character, etc) per the household's recipe catalog standards -
+-- there is no separate dietary_flags field. embedding: a JSON array of floats (one
 -- vector per recipe, built from the whole recipe text - see kitchendb/embeddings.py),
 -- always kept in sync with recipe by add_recipe/update_recipe/reindex_recipes so the
 -- two never drift apart. rating is a separate household preference signal (1-5, human-
--- or chat-set) that never touches embedding. No uniqueness constraint on name - a
+-- or chat-set) that never touches embedding. score/audit_feedback are the Food
+-- Inspector's judgement (NULL = not yet audited) - reset to NULL by update_recipe on
+-- every edit, same convention as weekly_menu. No uniqueness constraint on name - a
 -- household may keep more than one version of the same dish.
 
 -- Keyword half of search_recipes' hybrid search (see kitchendb/keyword_search.py). A

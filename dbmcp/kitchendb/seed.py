@@ -2,23 +2,16 @@
 
 seed_if_empty() only touches a table when it is completely empty, so it is safe to
 call on every startup and it never fights the agent once real data exists.
+
+The weekly menu, profile, and household members below mirror this household's actual
+in-use data (Authentic South Indian, high-protein) rather than generic placeholders,
+so a fresh install starts from a realistic, already-useful state.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-
-# weekly_menu.full_recipe is a JSON string array of short plain-text lines. Every
-# seeded dish uses this same generic method.
-_SEED_RECIPE_STEPS = [
-    "Wash and prepare every ingredient, then measure the spices and liquids into separate bowls.",
-    "Heat a wide pan over medium heat and add the oil. Add the aromatics and cook for 2 minutes until fragrant.",
-    "Add the main ingredients and cook for 5 minutes, stirring often so the edges colour evenly.",
-    "Add the grains, sauce, or liquid, reduce the heat, cover, and cook for 10 minutes until tender.",
-    "Remove the lid, taste, and adjust salt, acidity, and seasoning. Rest for 2 minutes.",
-    "Plate while warm, finish with the fresh garnish, and serve immediately.",
-]
 
 # (item_name, category, quantity, unit, minimum_threshold)
 _SEED_INVENTORY = [
@@ -30,75 +23,340 @@ _SEED_INVENTORY = [
     ("Greek yogurt", "Dairy", 700, "g", 300),
 ]
 
-# day -> list of (meal_type, dish_name, macros, comma-separated ingredients)
-_SEED_MENU: dict[str, list[tuple[str, str, str, str]]] = {
+# day -> list of (meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe)
+_SEED_MENU: dict[str, list[tuple[str, str, bool, str, list[str], list[str]]]] = {
     "monday": [
-        ("Breakfast", "Spinach masala eggs", "26g protein  /  18g carbs  /  20g fat", "Eggs, baby spinach, tomatoes"),
-        ("Lunch", "Paneer tikka bowls", "32g protein  /  48g carbs  /  18g fat", "Paneer, brown rice, spinach, yogurt"),
-        ("Snack", "Yogurt fruit crunch", "18g protein  /  26g carbs  /  8g fat", "Greek yogurt, banana, seeds"),
-        ("Dinner", "Lemon herb rice skillet", "24g protein  /  52g carbs  /  14g fat", "Brown rice, spinach, yogurt"),
+        (
+            "breakfast", "Moong Dal Chilla (Savory Lentil Pancakes)", True,
+            "Kcal: 220, P: 14g, C: 30g, Fb: 8g, F: 6g",
+            ["1 cup Yellow Moong Dal", "1 inch Ginger", "1 Green Chili", "Salt to taste"],
+            [
+                "Soak yellow moong dal for 4 hours.",
+                "Blend dal with ginger, green chili, and water into a smooth batter.",
+                "Add salt and a pinch of turmeric.",
+                "Pour ladlefuls onto a non-stick pan and cook until golden brown on both sides.",
+            ],
+        ),
+        (
+            "lunch", "Paneer & Brown Rice Bowl", True,
+            "Kcal: 420, P: 22g, C: 45g, Fb: 6g, F: 16g",
+            ["100g Paneer", "1 cup Brown rice", "1 cup Baby spinach"],
+            [
+                "Cook brown rice.",
+                "Sauté paneer cubes with turmeric and salt.",
+                "Combine rice and paneer in a bowl with fresh spinach.",
+            ],
+        ),
+        (
+            "snack", "Roasted Makhana (Fox Nuts)", True,
+            "Kcal: 150, P: 4g, C: 20g, Fb: 3g, F: 5g",
+            ["2 cups Makhana", "1 tsp Ghee", "Salt and Turmeric"],
+            [
+                "Dry roast makhana in a pan until crunchy.",
+                "Add a teaspoon of ghee and a pinch of salt and turmeric.",
+                "Toss until evenly coated.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Chettinad with Brown Rice", True,
+            "Kcal: 520, P: 38g, C: 48g, Fb: 5g, F: 18g",
+            ["150g Chicken breast", "1 cup Brown rice", "Coconut, Peppercorns, Cinnamon"],
+            [
+                "Sauté onions, ginger, and garlic.",
+                "Add chicken and a blend of roasted coconut, peppercorns, and cinnamon.",
+                "Simmer until chicken is tender.",
+                "Serve with steamed brown rice.",
+            ],
+        ),
     ],
     "tuesday": [
-        ("Breakfast", "Savory paneer toast", "29g protein  /  31g carbs  /  16g fat", "Paneer, wholegrain bread, tomatoes"),
-        ("Lunch", "Paneer tomato rice bowl", "28g protein  /  46g carbs  /  16g fat", "Paneer, brown rice, cherry tomatoes, spinach"),
-        ("Snack", "Spiced yogurt dip", "14g protein  /  12g carbs  /  7g fat", "Greek yogurt, cucumber, herbs"),
-        ("Dinner", "Tikka rice lettuce cups", "30g protein  /  39g carbs  /  15g fat", "Paneer, brown rice, lettuce"),
+        (
+            "breakfast", "Ragi Porridge (Finger Millet)", True,
+            "Kcal: 210, P: 6g, C: 35g, Fb: 7g, F: 5g",
+            ["1/2 cup Ragi flour", "1 cup Coconut milk", "1 tbsp Jaggery"],
+            [
+                "Mix ragi flour with water to avoid lumps.",
+                "Cook on medium heat until thickened.",
+                "Add coconut milk (dairy-free) and a bit of jaggery for sweetness.",
+            ],
+        ),
+        (
+            "lunch", "Vegetable Kurma with Brown Rice", True,
+            "Kcal: 380, P: 12g, C: 50g, Fb: 9g, F: 12g",
+            ["1 cup Brown rice", "Mixed vegetables (Carrot, Peas, Potato)", "Coconut paste"],
+            [
+                "Sauté carrots, peas, and potatoes.",
+                "Add a paste of coconut, poppy seeds, and cashew nuts.",
+                "Simmer until vegetables are cooked.",
+                "Serve with brown rice.",
+            ],
+        ),
+        (
+            "snack", "Spiced Buttermilk (Chaas)", True,
+            "Kcal: 80, P: 4g, C: 8g, Fb: 0g, F: 3g",
+            ["200ml Dairy-free yogurt/buttermilk", "1/2 tsp Cumin powder", "Salt"],
+            [
+                "Blend dairy-free yogurt/buttermilk with water.",
+                "Add roasted cumin powder and a pinch of salt.",
+                "Chill and serve.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Pepper Fry with Brown Rice", True,
+            "Kcal: 490, P: 36g, C: 48g, Fb: 4g, F: 14g",
+            ["150g Chicken breast", "1 cup Brown rice", "Black pepper, Curry leaves"],
+            [
+                "Sauté onions and curry leaves.",
+                "Add chicken and plenty of crushed black pepper.",
+                "Cook until dry and well-browned.",
+                "Serve with brown rice.",
+            ],
+        ),
     ],
     "wednesday": [
-        ("Breakfast", "Green breakfast bowl", "22g protein  /  35g carbs  /  12g fat", "Eggs, spinach, brown rice"),
-        ("Lunch", "Green goddess rice", "24g protein  /  54g carbs  /  14g fat", "Brown rice, spinach, yogurt"),
-        ("Snack", "Tomato paneer skewers", "19g protein  /  14g carbs  /  9g fat", "Paneer, cherry tomatoes, herbs"),
-        ("Dinner", "Creamy spinach eggs", "27g protein  /  20g carbs  /  19g fat", "Eggs, spinach, Greek yogurt"),
+        (
+            "breakfast", "Pesarattu (Green Gram Dosa)", True,
+            "Kcal: 230, P: 15g, C: 32g, Fb: 9g, F: 6g",
+            ["1 cup Green Moong Dal", "Ginger, Green Chili"],
+            [
+                "Soak whole green moong dal.",
+                "Grind with ginger and green chili.",
+                "Spread on a pan like a pancake and cook until crisp.",
+            ],
+        ),
+        (
+            "lunch", "Lemon Rice with Roasted Peanuts", True,
+            "Kcal: 350, P: 11g, C: 45g, Fb: 5g, F: 12g",
+            ["1 cup Brown rice", "2 tbsp Peanuts", "1 Lemon"],
+            [
+                "Sauté mustard seeds, curry leaves, and peanuts.",
+                "Mix in cooked brown rice.",
+                "Stir in lemon juice and turmeric.",
+            ],
+        ),
+        (
+            "snack", "Steamed Sprouts Salad", True,
+            "Kcal: 160, P: 12g, C: 22g, Fb: 7g, F: 2g",
+            ["1 cup Mixed sprouts", "Cucumber, Tomato, Lemon"],
+            [
+                "Steam mixed sprouts.",
+                "Mix with diced cucumber, tomatoes, and lemon juice.",
+                "Season with salt and a pinch of chaat masala.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Stew with Brown Rice", True,
+            "Kcal: 510, P: 37g, C: 48g, Fb: 4g, F: 18g",
+            ["150g Chicken breast", "1 cup Brown rice", "Coconut milk, Carrots"],
+            [
+                "Sauté onions and carrots.",
+                "Add chicken and coconut milk.",
+                "Simmer until tender and creamy.",
+                "Serve with brown rice.",
+            ],
+        ),
     ],
     "thursday": [
-        ("Breakfast", "Yogurt oat parfait", "20g protein  /  42g carbs  /  10g fat", "Greek yogurt, oats, banana"),
-        ("Lunch", "Roasted paneer salad", "35g protein  /  20g carbs  /  21g fat", "Paneer, cherry tomatoes, spinach"),
-        ("Snack", "Cucumber raita cup", "12g protein  /  10g carbs  /  5g fat", "Greek yogurt, cucumber, herbs"),
-        ("Dinner", "Golden egg rice", "25g protein  /  46g carbs  /  15g fat", "Eggs, brown rice, spinach"),
+        (
+            "breakfast", "Idli with Coconut Chutney", True,
+            "Kcal: 250, P: 8g, C: 40g, Fb: 4g, F: 7g",
+            ["2-3 Idlis (Rice/Urad dal)", "Fresh coconut, Ginger, Chili"],
+            [
+                "Steam fermented rice and urad dal batter.",
+                "Blend fresh coconut, green chili, and ginger for chutney.",
+                "Serve hot.",
+            ],
+        ),
+        (
+            "lunch", "Bisi Bele Bath (Lentil Rice)", True,
+            "Kcal: 390, P: 18g, C: 55g, Fb: 10g, F: 8g",
+            ["1/2 cup Brown rice", "1/2 cup Toor dal", "Mixed vegetables, Masala"],
+            [
+                "Cook brown rice and toor dal together.",
+                "Add mixed vegetables and a special bisi bele bath masala.",
+                "Simmer until mushy and flavorful.",
+            ],
+        ),
+        (
+            "snack", "Sundal (Seasoned Chickpeas)", True,
+            "Kcal: 210, P: 11g, C: 28g, Fb: 9g, F: 6g",
+            ["1 cup Chickpeas", "Grated coconut, Mustard seeds"],
+            [
+                "Boil chickpeas.",
+                "Sauté mustard seeds and curry leaves.",
+                "Toss chickpeas with grated coconut.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Ghee Roast with Brown Rice", True,
+            "Kcal: 540, P: 36g, C: 48g, Fb: 4g, F: 22g",
+            ["150g Chicken breast", "1 cup Brown rice", "Ghee, Tamarind paste"],
+            [
+                "Sauté chicken in ghee with a spicy tamarind-based paste.",
+                "Cook until the sauce thickens and coats the chicken.",
+                "Serve with brown rice.",
+            ],
+        ),
     ],
     "friday": [
-        ("Breakfast", "Paneer breakfast hash", "31g protein  /  34g carbs  /  17g fat", "Paneer, brown rice, tomatoes"),
-        ("Lunch", "Paneer spinach wraps", "30g protein  /  36g carbs  /  17g fat", "Paneer, spinach, yogurt, wholegrain wraps"),
-        ("Snack", "Cinnamon yogurt bowl", "17g protein  /  24g carbs  /  6g fat", "Greek yogurt, banana, seeds"),
-        ("Dinner", "Friday tomato rice", "23g protein  /  55g carbs  /  12g fat", "Brown rice, tomatoes, eggs"),
+        (
+            "breakfast", "Upma with Vegetables", True,
+            "Kcal: 240, P: 7g, C: 42g, Fb: 5g, F: 6g",
+            ["1/2 cup Semolina", "Mixed vegetables", "Mustard seeds, Curry leaves"],
+            [
+                "Roast semolina (rava).",
+                "Sauté onions, carrots, and peas.",
+                "Add water and simmer until the rava is cooked and fluffy.",
+            ],
+        ),
+        (
+            "lunch", "Curd Rice (Dairy-Free) with Pomegranate", True,
+            "Kcal: 310, P: 9g, C: 52g, Fb: 6g, F: 7g",
+            ["1 cup Brown rice", "1 cup Dairy-free yogurt", "Pomegranate seeds"],
+            [
+                "Mash cooked brown rice.",
+                "Mix with dairy-free yogurt.",
+                "Temper with mustard seeds and curry leaves.",
+                "Top with pomegranate seeds.",
+            ],
+        ),
+        (
+            "snack", "Roasted Almonds & Walnuts", True,
+            "Kcal: 220, P: 7g, C: 6g, Fb: 3g, F: 18g",
+            ["30g Almonds", "30g Walnuts"],
+            [
+                "Lightly toast almonds and walnuts in a pan.",
+                "Add a pinch of salt.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Saag (Spinach Chicken) with Brown Rice", True,
+            "Kcal: 480, P: 38g, C: 48g, Fb: 6g, F: 14g",
+            ["150g Chicken breast", "1 cup Brown rice", "2 cups Baby spinach"],
+            [
+                "Puree baby spinach.",
+                "Sauté chicken with ginger and garlic.",
+                "Stir in spinach puree and simmer.",
+                "Serve with brown rice.",
+            ],
+        ),
     ],
     "saturday": [
-        ("Breakfast", "Herbed egg scramble", "25g protein  /  16g carbs  /  18g fat", "Eggs, spinach, herbs"),
-        ("Lunch", "Paneer rainbow plate", "34g protein  /  32g carbs  /  19g fat", "Paneer, brown rice, tomatoes"),
-        ("Snack", "Yogurt cucumber cups", "13g protein  /  11g carbs  /  5g fat", "Greek yogurt, cucumber"),
-        ("Dinner", "One-pan spinach pilaf", "21g protein  /  51g carbs  /  13g fat", "Brown rice, spinach, yogurt"),
+        (
+            "breakfast", "Appam with Vegetable Stew", True,
+            "Kcal: 320, P: 8g, C: 45g, Fb: 7g, F: 12g",
+            ["Rice batter, Coconut milk", "Mixed vegetables"],
+            [
+                "Ferment rice and coconut milk batter.",
+                "Cook in an appam pan to get a bowl shape.",
+                "Simmer mixed vegetables in coconut milk.",
+            ],
+        ),
+        (
+            "lunch", "Masala Dosa with Sambar", True,
+            "Kcal: 410, P: 14g, C: 60g, Fb: 11g, F: 12g",
+            ["Dosa batter", "Potato, Onion", "Toor dal, Mixed vegetables"],
+            [
+                "Spread fermented rice/dal batter on a pan.",
+                "Fill with a potato-onion masala.",
+                "Serve with lentil-based vegetable sambar.",
+            ],
+        ),
+        (
+            "snack", "Fresh Coconut Water & Fruit", True,
+            "Kcal: 120, P: 2g, C: 25g, Fb: 3g, F: 1g",
+            ["1 Coconut water", "1 slice Papaya/Mango"],
+            [
+                "Serve fresh coconut water.",
+                "Pair with a slice of papaya or mango.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Biryani (Brown Rice)", True,
+            "Kcal: 580, P: 42g, C: 55g, Fb: 6g, F: 20g",
+            ["200g Chicken breast", "1 cup Brown rice", "Dairy-free yogurt, Spices"],
+            [
+                "Marinate chicken in yogurt (dairy-free), ginger, garlic, and spices.",
+                "Layer with parboiled brown rice.",
+                "Dum cook on low heat.",
+            ],
+        ),
     ],
     "sunday": [
-        ("Breakfast", "Weekend masala omelet", "27g protein  /  14g carbs  /  20g fat", "Eggs, tomatoes, spinach"),
-        ("Lunch", "Sunday paneer bowls", "33g protein  /  49g carbs  /  18g fat", "Paneer, brown rice, yogurt"),
-        ("Snack", "Fruit and yogurt lassi", "15g protein  /  30g carbs  /  5g fat", "Greek yogurt, banana, herbs"),
-        ("Dinner", "Comfort tomato shakshuka", "28g protein  /  24g carbs  /  16g fat", "Eggs, tomatoes, spinach"),
+        (
+            "breakfast", "Uttapam with Tomato Chutney", True,
+            "Kcal: 280, P: 9g, C: 45g, Fb: 6g, F: 8g",
+            ["Dosa batter", "Onion, Tomato, Chili"],
+            [
+                "Pour thick dosa batter on a pan.",
+                "Top with finely chopped onions, tomatoes, and chilies.",
+                "Cook until golden.",
+            ],
+        ),
+        (
+            "lunch", "Avial (Mixed Vegetable Stew) with Brown Rice", True,
+            "Kcal: 360, P: 11g, C: 48g, Fb: 9g, F: 14g",
+            ["1 cup Brown rice", "Mixed vegetables (Carrot, Beans)", "Coconut, Coconut oil"],
+            [
+                "Steam carrots, beans, and drumsticks.",
+                "Mix with a paste of coconut, green chili, and cumin.",
+                "Add a drizzle of coconut oil.",
+                "Serve with brown rice.",
+            ],
+        ),
+        (
+            "snack", "Roasted Peanuts & Seeds", True,
+            "Kcal: 200, P: 10g, C: 8g, Fb: 4g, F: 15g",
+            ["30g Peanuts", "20g Mixed seeds"],
+            [
+                "Roast peanuts, pumpkin seeds, and sunflower seeds.",
+                "Season with salt and a hint of pepper.",
+            ],
+        ),
+        (
+            "dinner", "Chicken Korma (Dairy-Free) with Brown Rice", True,
+            "Kcal: 530, P: 40g, C: 48g, Fb: 5g, F: 20g",
+            ["200g Chicken breast", "1 cup Brown rice", "Cashew paste, Mild spices"],
+            [
+                "Sauté onions and cashew paste.",
+                "Add chicken and a blend of mild spices.",
+                "Simmer until tender.",
+                "Serve with brown rice.",
+            ],
+        ),
     ],
 }
-
-
-def _ingredients_used(*wants: tuple[str, float, str]) -> str:
-    return json.dumps([{"item_name": name, "quantity": quantity, "unit": unit} for name, quantity, unit in wants])
-
 
 # (trigger_day, trigger_time, task_type, detailed_instructions JSON, ingredients_used JSON)
 _SEED_PREP = [
     (
         "monday", "07:30", "Morning prep",
         json.dumps(["Wash the spinach and pat it dry.", "Portion the Greek yogurt into the day's serving bowls."]),
-        _ingredients_used(("Baby spinach", 1, "pcs"), ("Greek yogurt", 200, "g")),
+        json.dumps([{"item_name": "Baby spinach", "quantity": 1, "unit": "pcs"}, {"item_name": "Greek yogurt", "quantity": 200, "unit": "g"}]),
     ),
     (
         "tuesday", "17:00", "Dinner prep",
         json.dumps(["Dice the cherry tomatoes.", "Press the paneer to remove excess water, then cube it."]),
-        _ingredients_used(("Cherry tomatoes", 150, "g"), ("Paneer", 200, "g")),
+        json.dumps([{"item_name": "Cherry tomatoes", "quantity": 150, "unit": "g"}, {"item_name": "Paneer", "quantity": 200, "unit": "g"}]),
     ),
     (
         "wednesday", "08:00", "Batch prep",
         json.dumps(["Rinse the brown rice.", "Cook until tender, then spread it in shallow containers to cool quickly."]),
-        _ingredients_used(("Brown rice", 0.5, "kg")),
+        json.dumps([{"item_name": "Brown rice", "quantity": 0.5, "unit": "kg"}]),
     ),
 ]
+
+# (name, dietary_preferences, health_conditions)
+_SEED_HOUSEHOLD_MEMBERS = [
+    ("Preksha", [], ["Lactose Intolerance"]),
+    ("Devansh", ["Can't eat spicy food."], []),
+]
+
+_SEED_PROFILE = {
+    "name": "Rakesh Kumar",
+    "email": "haiimrakesh@gmail.com",
+    "notes": "Make it mostly Authentic South Indian receipies with High Protein.",
+}
 
 
 def _is_empty(connection: sqlite3.Connection, table: str) -> bool:
@@ -116,17 +374,9 @@ def seed_if_empty(connection: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                (
-                    day,
-                    meal_type.lower(),
-                    dish,
-                    1,
-                    macros,
-                    json.dumps([part.strip() for part in ingredients.split(",") if part.strip()]),
-                    json.dumps(_SEED_RECIPE_STEPS),
-                )
+                (day, meal_type, dish, is_kid_friendly, macros, json.dumps(ingredients), json.dumps(full_recipe))
                 for day, meals in _SEED_MENU.items()
-                for meal_type, dish, macros, ingredients in meals
+                for meal_type, dish, is_kid_friendly, macros, ingredients, full_recipe in meals
             ],
         )
     if _is_empty(connection, "detailed_prep_schedule"):
@@ -135,4 +385,12 @@ def seed_if_empty(connection: sqlite3.Connection) -> None:
             "VALUES (?, ?, ?, ?, ?)",
             _SEED_PREP,
         )
-    connection.execute("INSERT OR IGNORE INTO user_profile (id, name) VALUES (1, 'Alex Kim')")
+    if _is_empty(connection, "household_members"):
+        connection.executemany(
+            "INSERT INTO household_members (name, dietary_preferences, health_conditions) VALUES (?, ?, ?)",
+            [(name, json.dumps(preferences), json.dumps(conditions)) for name, preferences, conditions in _SEED_HOUSEHOLD_MEMBERS],
+        )
+    connection.execute(
+        "INSERT OR IGNORE INTO user_profile (id, name, email, notes) VALUES (1, ?, ?, ?)",
+        (_SEED_PROFILE["name"], _SEED_PROFILE["email"], _SEED_PROFILE["notes"]),
+    )

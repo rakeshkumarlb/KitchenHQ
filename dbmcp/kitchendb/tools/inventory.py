@@ -71,7 +71,7 @@ def adjust_inventory_quantity(item_id: int, quantity_change: float) -> dict[str,
 
 @tool
 def remove_or_discard_inventory(item_id: int, quantity: float, reason: str = "Discarded") -> dict[str, Any]:
-    """Remove quantity from inventory and record it as discarded."""
+    """Remove quantity from inventory as a discard (spoilage, spillage, etc)."""
     if quantity <= 0:
         raise ValueError("quantity must be greater than zero")
     with connect() as connection:
@@ -83,9 +83,5 @@ def remove_or_discard_inventory(item_id: int, quantity: float, reason: str = "Di
         connection.execute(
             "UPDATE inventory SET quantity = quantity - ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?",
             (quantity, item_id),
-        )
-        connection.execute(
-            "INSERT INTO wastage_log (item_name, quantity_wasted) VALUES (?, ?)",
-            (f"{item['item_name']} ({reason.strip() or 'Discarded'})", quantity),
         )
     return fetch_record("inventory", item_id)

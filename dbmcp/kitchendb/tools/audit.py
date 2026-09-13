@@ -1,10 +1,11 @@
 """Food Inspector data operations: find unaudited rows, record a score + feedback.
 
 The Food Inspector is an LLM-as-judge role that evaluates decisions the Executive Chef
-(weekly_menu) and Sous Chef (detailed_prep_schedule) already made, against the same
-household rules/preferences/conditions those roles used (see get_household_preferences).
-It never edits the dish/task content itself - only these two record_* calls, which set
-`score` (0-100) and `audit_feedback` (free text) on the row being judged.
+(weekly_menu, recipes) and Sous Chef (detailed_prep_schedule) already made, against the
+same household rules/preferences/conditions and recipe catalog standards those roles used
+(see get_household_preferences). It never edits the dish/recipe/task content itself - only
+these record_* calls, which set `score` (0-100) and `audit_feedback` (free text) on the
+row being judged.
 """
 
 from __future__ import annotations
@@ -85,3 +86,43 @@ def record_prep_task_audit(prep_schedule_id: int, score: int, audit_feedback: st
         if cursor.rowcount == 0:
             raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
     return fetch_record("detailed_prep_schedule", prep_schedule_id)
+
+
+@tool
+def get_unaudited_recipes() -> list[dict[str, Any]]:
+    """Recipe catalog rows the Food Inspector has not yet scored (score IS NULL).
+
+    A recipe's score/audit_feedback is cleared back to NULL whenever the Executive Chef
+    (or a household member's "identify tags"/"recreate instructions" request) saves a
+    change to it via update_recipe, so this always reflects the latest content still
+    awaiting judgement.
+    """
+    with connect() as connection:
+        return [
+            dict(row)
+            for row in connection.execute("SELECT * FROM recipes WHERE score IS NULL ORDER BY id")
+        ]
+
+
+@tool
+def record_recipe_audit(recipe_id: int, score: int, audit_feedback: str) -> dict[str, Any]:
+    """Record the Food Inspector's judgement of one recipe catalog row.
+
+    score: 0-100, judged against the household's recipe catalog standards - are the tags
+    accurate and complete (diet category stated explicitly, both positive and negative;
+    allergen/nutrition labels present where the ingredients/macros support them), and are
+    the instructions clear, ordered, and complete.
+    audit_feedback: a short written explanation of the score - what the recipe gets right
+    and, if the score is not perfect, exactly what tag or instruction issue it falls
+    short on.
+    """
+    if not 0 <= score <= 100:
+        raise ValueError("score must be between 0 and 100")
+    with connect() as connection:
+        cursor = connection.execute(
+            "UPDATE recipes SET score = ?, audit_feedback = ? WHERE id = ?",
+            (score, audit_feedback.strip(), recipe_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"No recipes record found for id {recipe_id}")
+    return fetch_record("recipes", recipe_id)

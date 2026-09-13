@@ -275,18 +275,19 @@ def test_household_members_crud_and_preferences(client):
     assert added["dietary_preferences"] == ["vegetarian", "no nuts"]
     assert added["health_conditions"] == ["diabetic"]
 
+    # A fresh DB seeds two household members already, so this one is appended after them.
     listed = client.get("/api/household-members").json()
-    assert [m["name"] for m in listed] == ["Kiran"]
+    assert [m["name"] for m in listed] == ["Preksha", "Devansh", "Kiran"]
 
     updated = client.put(f"/api/household-members/{added['id']}", json={"health_conditions": ["diabetic", "lactose intolerant"]}).json()
     assert updated["health_conditions"] == ["diabetic", "lactose intolerant"]
     assert updated["dietary_preferences"] == ["vegetarian", "no nuts"]  # untouched by the partial patch
 
-    assert client.get("/api/dashboard").json()["household_members"][0]["name"] == "Kiran"
+    assert client.get("/api/dashboard").json()["household_members"][-1]["name"] == "Kiran"
 
     deleted = client.delete(f"/api/household-members/{added['id']}")
     assert deleted.status_code == 200
-    assert client.get("/api/household-members").json() == []
+    assert [m["name"] for m in client.get("/api/household-members").json()] == ["Preksha", "Devansh"]
 
     missing = client.put(f"/api/household-members/{added['id']}", json={"name": "Anyone"})
     assert missing.status_code == 400
