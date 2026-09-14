@@ -67,6 +67,7 @@ function RecipeDetail({ item, onClose, onRate, asking, onAsk, askReply }) {
       <button className="recipe-close icon-button" onClick={onClose} aria-label="Close recipe"><X size={19} /></button>
       <p className="eyebrow">{recipe.origin || 'Household recipe'} · serves {recipe.serves || 1}</p>
       <h2 id="catalog-recipe-title">{recipe.name}</h2>
+      {recipe.description && <p className="muted-copy">{recipe.description}</p>}
       <StarRating value={item.rating || 0} onRate={(rating) => onRate(item.id, rating)} />
       <div className="recipe-meta">
         {recipe.prep_time_minutes ? <span>Prep {recipe.prep_time_minutes} min</span> : null}
@@ -140,9 +141,15 @@ export default function Recipes() {
 
   const askChef = async (item, kind) => {
     const askKey = `${item.id}:${kind}`;
+    // Recreating instructions should address whatever the Food Inspector already
+    // flagged, not just produce a generic rewrite - tags refreshes don't carry this
+    // context since they aren't judged on the same axis.
+    const auditContext = item.score != null
+      ? ` The Food Inspector previously scored these instructions ${item.score}/100 with this feedback: "${item.audit_feedback}". Address that feedback specifically.`
+      : '';
     const message = kind === 'tags'
       ? `Please review recipe #${item.id} ("${item.recipe.name}") in the catalog and refresh its tags per the recipe catalog standards, changing nothing else. Reply in one short sentence with what changed.`
-      : `Please review recipe #${item.id} ("${item.recipe.name}") in the catalog and rewrite its instructions for clarity and correctness, keeping the dish and its ingredients the same unless something is clearly wrong. Reply in one short sentence with what changed.`;
+      : `Please review recipe #${item.id} ("${item.recipe.name}") in the catalog and rewrite its instructions for clarity and correctness, keeping the dish and its ingredients the same unless something is clearly wrong.${auditContext} Reply in one short sentence with what changed.`;
     setAsking(askKey);
     setError('');
     try {

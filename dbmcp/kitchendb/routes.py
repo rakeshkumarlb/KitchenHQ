@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from constants import DAY_ORDER, DAYS, MEAL_TYPE_ORDER, MEAL_TYPES, day_case_sql, meal_case_sql
+from tags import TAG_CATEGORIES
 
 from .db import connect, fetch_record_in
 from .models import (
@@ -24,6 +25,7 @@ from .models import (
     InventoryAdjustmentRequest,
     InventoryDiscardRequest,
     MenuItemRequest,
+    MenuSkipRequest,
     PrepCancellationRequest,
     PrepCompletionRequest,
     PrepScheduleRequest,
@@ -33,6 +35,7 @@ from .models import (
     ShoppingAcknowledgementRequest,
     ShoppingItemEditRequest,
     ShoppingItemsRequest,
+    WeeklyPlanRequest,
 )
 from .tools.inventory import add_inventory, adjust_inventory_quantity, remove_or_discard_inventory
 from .tools.prep import add_detailed_prep_schedule, cancel_prep_schedule, capture_prep_completion_status
@@ -61,7 +64,8 @@ from .tools.recipes import (
     search_recipes,
     update_recipe,
 )
-from .tools.weekly_menu import add_weekly_menu_item
+from .tools.weekly_menu import add_weekly_menu_item, mark_weekly_menu_skipped
+from .tools.weekly_plan import get_weekly_plans, upsert_weekly_plan
 
 router = APIRouter()
 
@@ -101,22 +105,36 @@ def dashboard() -> dict[str, Any]:
                 ORDER BY quantity_consumed DESC, i.item_name
                 """
             )],
-            "profile": (lambda row: dict(row) if row is not None else {})(
-                connection.execute("SELECT * FROM user_profile WHERE id = 1").fetchone()
-            ),
+            "profile": _dashboard_profile(connection),
             "household_members": [
                 {**dict(row), "dietary_preferences": json.loads(row["dietary_preferences"]), "health_conditions": json.loads(row["health_conditions"])}
                 for row in connection.execute("SELECT * FROM household_members ORDER BY id")
             ],
-            # Day / meal vocabulary for non-Python clients (the chatui React app) - the
-            # single source of truth is shared/constants.py, vendored here as constants.py.
+            "weekly_plans": get_weekly_plans(),
+            # Day / meal / tag vocabulary for non-Python clients (the chatui React app) -
+            # the single source of truth is shared/constants.py and shared/tags.py,
+            # vendored here as constants.py and tags.py.
             "constants": {
                 "days": list(DAYS),
                 "meal_types": list(MEAL_TYPES),
                 "day_order": DAY_ORDER,
                 "meal_type_order": MEAL_TYPE_ORDER,
+                "tags": [{"category": category, "tags": list(tags)} for category, tags in TAG_CATEGORIES],
             },
         }
+
+
+def _dashboard_profile(connection) -> dict[str, Any]:
+    row = connection.execute("SELECT * FROM user_profile WHERE id = 1").fetchone()
+    if row is None:
+        return {}
+    profile = dict(row)
+    # favorite_recipes is legacy and stays a raw JSON string (existing chatui precedent);
+    # the newer preference fields are parsed server-side into native JSON, same treatment
+    # household_members already gets for dietary_preferences/health_conditions.
+    for field, default in (("restrictions", "[]"), ("skip_meals", "{}"), ("preferred_tags", "[]"), ("excluded_tags", "[]")):
+        profile[field] = json.loads(profile.get(field) or default)
+    return profile
 
 
 @router.post("/api/inventory")
@@ -149,6 +167,29 @@ def api_add_menu_item(request: MenuItemRequest) -> dict[str, Any]:
         return add_weekly_menu_item(**request.model_dump())
     except ValueError as error:
         raise _tool_error(error) from error
+
+
+@router.post("/api/weekly-menu/skip")
+def api_skip_menu_slots(request: MenuSkipRequest) -> list[dict[str, Any]]:
+    # Code-triggered only (agent-api's run_job, right after a successful weekly_menu job)
+    # - writes a placeholder for every slot that job's skip_meals config excluded, so a
+    # dish saved for that slot in an earlier week stops showing as if still planned.
+    try:
+        return mark_weekly_menu_skipped([slot.model_dump() for slot in request.slots])
+    except ValueError as error:
+        raise _tool_error(error) from error
+
+
+@router.get("/api/weekly-plans")
+def api_get_weekly_plans() -> list[dict[str, Any]]:
+    return get_weekly_plans()
+
+
+@router.post("/api/weekly-plans")
+def api_upsert_weekly_plan(request: WeeklyPlanRequest) -> dict[str, Any]:
+    # Code-triggered only (agent-api's run_job, right after a successful weekly_menu job)
+    # - never called by an LLM, so no ValueError->400 translation needed beyond Pydantic's.
+    return upsert_weekly_plan(**request.model_dump())
 
 
 @router.post("/api/prep-schedule")

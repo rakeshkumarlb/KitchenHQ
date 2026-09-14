@@ -18,8 +18,7 @@ export default function Sidebar({ page, onNavigate, open, collapsed, onToggleCol
       <button type="button" className="collapse-toggle" onClick={onToggleCollapse} aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'} title={collapsed ? 'Expand navigation' : 'Collapse navigation'}>
         {collapsed ? <PanelLeftOpen size={16} strokeWidth={1.8} /> : <PanelLeftClose size={16} strokeWidth={1.8} />}
       </button>
-    </div>
-    <p className="nav-label">Workspace</p>
+    </div><br />
     <nav>{navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-link ${page === id ? 'active' : ''}`} onClick={() => onNavigate(id)} title={label}><Icon size={18} strokeWidth={1.8} /><span>{label}</span></button>)}</nav>
     <div className="sidebar-foot"><span className="online-dot" /> <span className="sidebar-foot-text">Systems connected</span></div>
   </aside>;

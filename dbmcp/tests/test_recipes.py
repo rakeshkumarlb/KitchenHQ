@@ -11,6 +11,7 @@ TEST_API_KEY = "test-key"
 
 _SAMPLE_RECIPE = {
     "name": "Paneer Butter Masala",
+    "description": "A creamy North Indian curry of paneer cubes in a spiced tomato gravy.",
     "origin": "North Indian",
     "serves": 4,
     "prep_time_minutes": 15,
@@ -58,6 +59,7 @@ def client(tmp_path, monkeypatch):
 def test_recipe_crud_round_trip(client):
     added = client.post("/api/recipes", json={"recipe": _SAMPLE_RECIPE}).json()
     assert added["name"] == "Paneer Butter Masala"
+    assert added["recipe"]["description"] == _SAMPLE_RECIPE["description"]
     assert added["recipe"]["ingredients"] == [{"item_name": "paneer", "quantity": 250.0, "unit": "g"}]
     assert added["rating"] is None
     assert added["score"] is None
@@ -143,6 +145,9 @@ def test_add_recipe_validation_failures(client):
 
     bad_instructions = client.post("/api/recipes", json={"recipe": {**_SAMPLE_RECIPE, "instructions": []}})
     assert bad_instructions.status_code == 400
+
+    bad_description = client.post("/api/recipes", json={"recipe": {**_SAMPLE_RECIPE, "description": "  "}})
+    assert bad_description.status_code == 400
 
 
 def test_rate_recipe(client):

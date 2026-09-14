@@ -56,9 +56,7 @@ def test_inventory_add_adjust_discard(client):
     assert discarded["quantity"] == 12
 
 
-def test_menu_item_add_and_policy_rejects_restricted_lunch(client):
-    import init_db
-
+def test_menu_item_add(client):
     saved = client.post(
         "/api/weekly-menu",
         json={
@@ -68,27 +66,80 @@ def test_menu_item_add_and_policy_rejects_restricted_lunch(client):
             "is_kid_friendly": True,
             "macros": "30g protein",
             "ingredients": ["chicken thigh", "herbs"],
+            "description": "A simple herb-roasted chicken.",
             "full_recipe": ["Season the chicken", "Roast for 40 minutes"],
         },
     ).json()
     assert saved["dish_name"] == "Roast chicken"
     assert json.loads(saved["ingredients"]) == ["chicken thigh", "herbs"]
+    assert saved["description"] == "A simple herb-roasted chicken."
     assert saved["updated_at"]
 
-    # POST /api/weekly-menu/validate is soft-deleted; the policy function is still the
-    # MCP tool, so exercise it directly.
-    policy = init_db.validate_weekly_menu_policy(
-        [
-            {
-                "day_of_week": "monday",
-                "meal_type": "lunch",
-                "dish_name": "Chicken rice bowl",
-                "ingredients": "chicken, rice",
-            }
-        ]
+    # There is no deterministic policy gate anymore (removed in favour of the household's
+    # configurable `restrictions`, judged by the Food Inspector - see
+    # test_profile_preferences_roundtrip_and_validation and get_household_preferences).
+    # A weekday-lunch dish that would once have been rejected now just saves.
+    lunch = client.post(
+        "/api/weekly-menu",
+        json={
+            "day_of_week": "monday",
+            "meal_type": "lunch",
+            "dish_name": "Chicken rice bowl",
+            "is_kid_friendly": True,
+            "macros": "25g protein",
+            "ingredients": ["chicken", "rice"],
+            "description": "A quick chicken and rice bowl.",
+        },
+    ).json()
+    assert lunch["dish_name"] == "Chicken rice bowl"
+
+
+def test_menu_item_requires_description_and_captures_source_recipe(client, monkeypatch):
+    # Recipe embeddings aren't needed for this test - stub them the same way
+    # test_recipes.py does, so add_recipe doesn't try to download the real model.
+    import zlib
+
+    import kitchendb.tools.recipes as recipes_module
+
+    def fake_embed_text(text: str) -> list[float]:
+        vector = [0.0] * 64
+        for word in text.lower().split():
+            vector[zlib.crc32(word.encode()) % len(vector)] += 1.0
+        return vector
+
+    monkeypatch.setattr(recipes_module, "embed_text", fake_embed_text)
+
+    missing_description = client.post(
+        "/api/weekly-menu",
+        json={"day_of_week": "wednesday", "meal_type": "dinner", "dish_name": "Test dish",
+              "is_kid_friendly": True, "macros": "10P", "ingredients": ["x"], "description": "   "},
     )
-    assert policy["valid"] is False
-    assert "chicken" in policy["violations"][0].lower()
+    assert missing_description.status_code == 400
+
+    recipe = client.post("/api/recipes", json={"recipe": {
+        "name": "Base Recipe", "description": "A base recipe.", "origin": "Test", "serves": 2,
+        "ingredients": [{"item_name": "x", "quantity": 1, "unit": "pcs"}],
+        "instructions": ["Do it."], "meal_types": ["dinner"], "tags": ["Vegetarian"],
+    }}).json()
+
+    saved = client.post(
+        "/api/weekly-menu",
+        json={"day_of_week": "wednesday", "meal_type": "dinner", "dish_name": "Test dish",
+              "is_kid_friendly": True, "macros": "10P", "ingredients": ["x"],
+              "description": "A quick test dish.", "tags": ["Vegetarian"],
+              "source_recipe_id": recipe["id"]},
+    ).json()
+    assert saved["description"] == "A quick test dish."
+    assert json.loads(saved["tags"]) == ["Vegetarian"]
+    assert saved["source_recipe_id"] == recipe["id"]
+
+    bad_source = client.post(
+        "/api/weekly-menu",
+        json={"day_of_week": "wednesday", "meal_type": "lunch", "dish_name": "Test dish 2",
+              "is_kid_friendly": True, "macros": "10P", "ingredients": ["x"],
+              "description": "A quick test dish.", "source_recipe_id": 999999},
+    )
+    assert bad_source.status_code == 400
 
 
 def test_shopping_items_acknowledge_is_idempotent(client):
@@ -252,6 +303,60 @@ def test_profile_roundtrip_and_validation(client):
     assert client.get("/api/dashboard").json()["profile"]["name"] == "Sam Rivera"
 
 
+def test_profile_preferences_roundtrip_and_validation(client):
+    default_profile = client.get("/api/dashboard").json()["profile"]
+    # Seeded defaults reproduce the old hardcoded lunch/variety rules, now editable.
+    seeded_ids = {entry["id"] for entry in default_profile["restrictions"]}
+    assert seeded_ids == {"no_nonveg_lunch", "lunch_variety"}
+    assert default_profile["allow_recipe_invention"] == 1
+    assert default_profile["allow_unapproved_recipes"] == 1
+    assert default_profile["skip_meals"] == {}
+    assert default_profile["preferred_tags"] == []
+
+    new_restrictions = [
+        {"id": "no_nonveg_lunch", "label": "No egg/meat/fish in lunches", "category": "dietary", "enabled": False, "scope": "per_meal"},
+        {"id": "lunch_variety", "label": "Weekday lunches must be distinct", "category": "variety", "enabled": True, "value": 5, "scope": "week"},
+    ]
+    updated = client.put(
+        "/api/profile",
+        json={
+            "restrictions": new_restrictions,
+            "allow_recipe_invention": False,
+            "skip_meals": {"Monday": ["lunch", "Lunch"], "tuesday": ["dinner"]},
+            "preferred_tags": ["Indian", "Air Fryer", ""],
+            "excluded_tags": ["Dairy-Free"],
+        },
+    ).json()
+    assert json.loads(updated["restrictions"])[0]["enabled"] is False
+    assert json.loads(updated["skip_meals"]) == {"monday": ["lunch"], "tuesday": ["dinner"]}
+    assert json.loads(updated["preferred_tags"]) == ["Indian", "Air Fryer"]
+    assert updated["allow_recipe_invention"] == 0
+    assert updated["allow_unapproved_recipes"] == 1  # untouched by the partial patch
+
+    dashboard_profile = client.get("/api/dashboard").json()["profile"]
+    assert dashboard_profile["skip_meals"] == {"monday": ["lunch"], "tuesday": ["dinner"]}
+
+    prefs = _get_household_preferences()
+    assert prefs["allow_recipe_invention"] is False
+    assert prefs["skip_meals"] == {"monday": ["lunch"], "tuesday": ["dinner"]}
+    assert prefs["preferred_tags"] == ["Indian", "Air Fryer"]
+    assert prefs["excluded_tags"] == ["Dairy-Free"]
+    per_meal = [r for r in prefs["restrictions"] if r["scope"] == "per_meal"]
+    assert per_meal[0]["enabled"] is False
+
+    missing_scope = client.put("/api/profile", json={"restrictions": [{"id": "x", "label": "X"}]})
+    assert missing_scope.status_code == 400
+
+    bad_skip_day = client.put("/api/profile", json={"skip_meals": {"someday": ["lunch"]}})
+    assert bad_skip_day.status_code == 400
+
+
+def _get_household_preferences():
+    from kitchendb.tools.profile import get_household_preferences
+
+    return get_household_preferences()
+
+
 def _add_menu_item(client, dish_name, *, day, meal):
     return client.post(
         "/api/weekly-menu",
@@ -262,6 +367,7 @@ def _add_menu_item(client, dish_name, *, day, meal):
             "is_kid_friendly": True,
             "macros": "20g protein",
             "ingredients": ["assorted"],
+            "description": f"{dish_name}, a household favorite.",
         },
     ).json()
 
@@ -295,7 +401,7 @@ def test_household_members_crud_and_preferences(client):
 
 def test_weekly_menu_audit_flow(client):
     # get_unaudited_weekly_menu_items / record_weekly_menu_audit are MCP-only tools
-    # (no REST route, like validate_weekly_menu_policy above), so exercise them directly.
+    # (no REST route), so exercise them directly.
     from kitchendb.tools.audit import get_unaudited_weekly_menu_items, record_weekly_menu_audit
 
     saved = _add_menu_item(client, "Dish 0", day="monday", meal="lunch")
@@ -315,6 +421,44 @@ def test_weekly_menu_audit_flow(client):
     resaved = _add_menu_item(client, "Dish 0 v2", day="monday", meal="lunch")
     assert resaved["score"] is None
     assert resaved["audit_feedback"] is None
+
+
+def test_weekly_plan_upsert_and_audit_flow(client):
+    from kitchendb.tools.audit import get_unaudited_weekly_plans, record_weekly_plan_audit
+
+    plan = client.post(
+        "/api/weekly-plans",
+        json={
+            "week_start_date": "2026-09-14",
+            "week_end_date": "2026-09-20",
+            "skip_meals_snapshot": {"monday": ["lunch"]},
+            "chef_note_snapshot": "Keep it light this week.",
+            "restrictions_snapshot": [{"id": "lunch_variety", "label": "Lunch variety", "scope": "week", "value": 5, "enabled": True}],
+        },
+    ).json()
+    assert plan["score"] is None
+    assert plan["week_start_date"] == "2026-09-14"
+    assert plan["skip_meals_snapshot"] == {"monday": ["lunch"]}
+    assert plan["chef_note_snapshot"] == "Keep it light this week."
+    assert plan["restrictions_snapshot"][0]["id"] == "lunch_variety"
+
+    unaudited = get_unaudited_weekly_plans()
+    assert plan["id"] in [row["id"] for row in unaudited]
+    record_weekly_plan_audit(plan["id"], 90, "Good lunch variety across the week.")
+
+    plans = client.get("/api/weekly-plans").json()
+    audited = next(row for row in plans if row["id"] == plan["id"])
+    assert audited["score"] == 90
+    assert audited["restrictions_snapshot"][0]["label"] == "Lunch variety"
+    assert client.get("/api/dashboard").json()["weekly_plans"][0]["id"] == plan["id"]
+
+    # Re-posting the same week upserts (by week_start_date) and clears the audit again.
+    resaved = client.post(
+        "/api/weekly-plans",
+        json={"week_start_date": "2026-09-14", "week_end_date": "2026-09-20", "skip_meals_snapshot": {}},
+    ).json()
+    assert resaved["id"] == plan["id"]
+    assert resaved["score"] is None
 
 
 def test_prep_task_audit_includes_cancelled(client):
@@ -348,12 +492,48 @@ def test_weekly_menu_item_is_an_upsert_with_no_duplicates(client):
         client.post(
             "/api/weekly-menu",
             json={"day_of_week": "monday", "meal_type": "breakfast", "dish_name": dish,
-                  "is_kid_friendly": True, "macros": "20P", "ingredients": ["x"]},
+                  "is_kid_friendly": True, "macros": "20P", "ingredients": ["x"], "description": dish},
         )
     menu = client.get("/api/dashboard").json()["menu"]
     monday_breakfast = [row for row in menu if row["day_of_week"] == "monday" and row["meal_type"] == "breakfast"]
     assert len(monday_breakfast) == 1
     assert monday_breakfast[0]["dish_name"] == "Third take"
+
+
+def test_skipped_menu_slot_replaces_a_stale_saved_dish(client):
+    # A slot planned one week (a real dish saved via add_weekly_menu_item) that the
+    # household then marks skip_meals for the next week must stop showing that stale
+    # dish - agent-api's run_job calls this deterministically for every skipped slot,
+    # since the Executive Chef is told not to call add_weekly_menu_item for them.
+    client.post(
+        "/api/weekly-menu",
+        json={"day_of_week": "tuesday", "meal_type": "lunch", "dish_name": "Leftover roast",
+              "is_kid_friendly": True, "macros": "20P", "ingredients": ["x"], "description": "Leftover roast, reheated."},
+    )
+    skipped = client.post(
+        "/api/weekly-menu/skip", json={"slots": [{"day_of_week": "Tuesday", "meal_type": "lunch"}]}
+    ).json()
+    assert skipped[0]["dish_name"] == "Skipped"
+    assert skipped[0]["is_skipped"] == 1
+    assert skipped[0]["score"] == 100
+
+    menu = client.get("/api/dashboard").json()["menu"]
+    row = next(r for r in menu if r["day_of_week"] == "tuesday" and r["meal_type"] == "lunch")
+    assert row["dish_name"] == "Skipped"
+    assert row["is_skipped"] == 1
+
+    # get_unaudited_weekly_menu_items must not surface the placeholder for judgement.
+    from kitchendb.tools.audit import get_unaudited_weekly_menu_items
+    assert row["id"] not in {item["id"] for item in get_unaudited_weekly_menu_items()}
+
+    # Saving a real dish for the slot again clears is_skipped and resets the score.
+    resaved = client.post(
+        "/api/weekly-menu",
+        json={"day_of_week": "tuesday", "meal_type": "lunch", "dish_name": "Dal and rice",
+              "is_kid_friendly": True, "macros": "18P", "ingredients": ["dal", "rice"], "description": "Comforting dal and rice."},
+    ).json()
+    assert resaved["is_skipped"] == 0
+    assert resaved["score"] is None
 
 
 def test_prep_schedule_creation_returns_row_without_sending_email(client):
@@ -552,6 +732,12 @@ def test_dashboard_includes_day_meal_constants(client):
     assert constants["day_order"]["monday"] == 1
     assert constants["meal_type_order"]["dinner"] == 4
 
+    tag_categories = {entry["category"]: entry["tags"] for entry in constants["tags"]}
+    assert "Cuisine" in tag_categories
+    assert "Indian" in tag_categories["Cuisine"]
+    assert "Dietary" in tag_categories
+    assert "Vegetarian" in tag_categories["Dietary"]
+
 
 def test_constants_py_matches_shared_canonical_copy():
     vendored = Path(__file__).resolve().parent.parent / "constants.py"
@@ -560,6 +746,16 @@ def test_constants_py_matches_shared_canonical_copy():
         pytest.skip("shared/ not present (standalone dbmcp checkout)")
     assert vendored.read_bytes() == shared.read_bytes(), (
         "dbmcp/constants.py has drifted from shared/constants.py — run `python shared/sync.py`"
+    )
+
+
+def test_tags_py_matches_shared_canonical_copy():
+    vendored = Path(__file__).resolve().parent.parent / "tags.py"
+    shared = Path(__file__).resolve().parent.parent.parent / "shared" / "tags.py"
+    if not shared.exists():
+        pytest.skip("shared/ not present (standalone dbmcp checkout)")
+    assert vendored.read_bytes() == shared.read_bytes(), (
+        "dbmcp/tags.py has drifted from shared/tags.py — run `python shared/sync.py`"
     )
 
 

@@ -37,12 +37,29 @@ class MenuItemRequest(BaseModel):
     is_kid_friendly: bool
     macros: str
     ingredients: list[str] = Field(min_length=1)
+    description: str = Field(min_length=1)
     full_recipe: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    source_recipe_id: int | None = None
 
     @field_validator("day_of_week")
     @classmethod
     def _validate_day(cls, value: str) -> str:
         return validate_day(value)
+
+
+class MenuSlotRequest(BaseModel):
+    day_of_week: str
+    meal_type: str = Field(min_length=1)
+
+    @field_validator("day_of_week")
+    @classmethod
+    def _validate_day(cls, value: str) -> str:
+        return validate_day(value)
+
+
+class MenuSkipRequest(BaseModel):
+    slots: list[MenuSlotRequest] = Field(min_length=1)
 
 
 class PrepScheduleRequest(BaseModel):
@@ -105,6 +122,20 @@ class ProfileUpdateRequest(BaseModel):
     cc_emails: str | None = None
     notes: str | None = None
     notify_on_task_creation: bool | None = None
+    restrictions: list[dict[str, Any]] | None = None
+    allow_recipe_invention: bool | None = None
+    allow_unapproved_recipes: bool | None = None
+    skip_meals: dict[str, list[str]] | None = None
+    preferred_tags: list[str] | None = None
+    excluded_tags: list[str] | None = None
+
+
+class WeeklyPlanRequest(BaseModel):
+    week_start_date: str = Field(min_length=1)
+    week_end_date: str = Field(min_length=1)
+    skip_meals_snapshot: dict[str, list[str]] = Field(default_factory=dict)
+    chef_note_snapshot: str = ""
+    restrictions_snapshot: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HouseholdMemberRequest(BaseModel):

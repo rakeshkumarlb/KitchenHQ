@@ -47,6 +47,7 @@ def embedding_text_for(recipe: dict[str, Any]) -> str:
     ingredient_names = ", ".join(str(item.get("item_name", "")) for item in recipe.get("ingredients", []))
     parts = [
         str(recipe.get("name", "")),
+        str(recipe.get("description", "")),
         str(recipe.get("origin", "")),
         ingredient_names,
         " ".join(recipe.get("instructions", [])),

@@ -8,8 +8,9 @@ Each function is also a plain callable - kitchendb/routes.py imports the same fu
 to build the REST surface, so a data operation is written once and exposed twice.
 
 Not every function here is an MCP tool: ``cancel_prep_schedule``,
-``acknowledge_shopping_items``, ``get_user_profile`` and ``update_user_profile`` are
-REST-only (human actions, not agent ones) and carry no ``@tool``.
+``acknowledge_shopping_items``, ``get_user_profile``, ``update_user_profile`` and
+``upsert_weekly_plan`` are REST-only (human actions or code-triggered housekeeping, not
+agent ones) and carry no ``@tool``.
 """
 
 from __future__ import annotations
@@ -17,6 +18,6 @@ from __future__ import annotations
 from .registry import registered_tools
 
 # Imported for their registration side effect.
-from . import inventory, weekly_menu, prep, shopping, profile, audit, recipes  # noqa: E402,F401
+from . import inventory, weekly_menu, weekly_plan, prep, shopping, profile, audit, recipes  # noqa: E402,F401
 
 __all__ = ["registered_tools"]

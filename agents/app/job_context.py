@@ -63,6 +63,10 @@ JOB_CONTEXT: dict[str, dict[str, str]] = {
         "focus": "every weekly_menu row not yet scored",
         "rationale": "judge the Executive Chef's saved decisions against the household rules and preferences",
     },
+    "weekly_plan_audit": {
+        "focus": "every weekly_plans row not yet scored",
+        "rationale": "judge each saved week's whole-plan, week-scope properties (e.g. lunch variety) that can't be judged from a single weekly_menu row alone",
+    },
     "task_audit": {
         "focus": "every prep-schedule row not yet scored",
         "rationale": "judge the Sous Chef's saved decisions against the household rules and preferences",

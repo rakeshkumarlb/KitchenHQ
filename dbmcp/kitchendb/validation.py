@@ -6,7 +6,6 @@ request models (kitchendb/models.py).
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from constants import DAY_SET, MEAL_TYPE_SET
@@ -18,8 +17,10 @@ from .units import canonicalize_inventory_unit
 # can't bloat a row.
 MENU_LINES_LIMIT = 40
 
-# Ingredients/terms that must never appear in a weekday lunch (school policy).
-RESTRICTED_LUNCH_TERMS = ("egg", "chicken", "beef", "pork", "fish", "meat", "turkey", "seafood")
+# recipes.recipe.description and weekly_menu.description are a sentence or two, not a
+# full recap - cap the length so a runaway model can't turn it into a second instructions
+# field.
+DESCRIPTION_MAX_LENGTH = 300
 
 
 def validate_day(day_of_week: str) -> str:
@@ -51,6 +52,20 @@ def clean_line_list(value: Any, *, field: str, required: bool) -> list[str]:
     return lines
 
 
+def clean_short_text(value: Any, *, field: str, required: bool) -> str:
+    """Normalize a short free-text field (e.g. a recipe/dish description).
+
+    Trims whitespace and caps length at DESCRIPTION_MAX_LENGTH; required=True rejects
+    an empty result.
+    """
+    text = str(value or "").strip()
+    if required and not text:
+        raise ValueError(f"{field} must not be empty")
+    if len(text) > DESCRIPTION_MAX_LENGTH:
+        raise ValueError(f"{field} cannot be longer than {DESCRIPTION_MAX_LENGTH} characters")
+    return text
+
+
 def normalize_ingredients_used(ingredients_used: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Validate raw {item_name, quantity, unit} entries into a clean deduction list.
 
@@ -74,25 +89,3 @@ def normalize_ingredients_used(ingredients_used: list[dict[str, Any]] | None) ->
         # given - convert() at deduction time approximates or skips them.
         normalized.append({"item_name": name, "quantity": quantity, "unit": canonicalize_inventory_unit(raw_unit) or raw_unit})
     return normalized
-
-
-def menu_policy_violations(menu_items: list[dict[str, Any]]) -> list[str]:
-    """Check school-lunch restrictions and weekday lunch variety across a menu."""
-    violations: list[str] = []
-    lunch_dishes: list[str] = []
-    for item in menu_items:
-        meal_type = str(item.get("meal_type", "")).strip().lower()
-        dish_name = str(item.get("dish_name", "")).strip()
-        ingredients = str(item.get("ingredients", "")).lower()
-        if meal_type == "lunch":
-            lunch_dishes.append(dish_name.lower())
-            restricted = [
-                term
-                for term in RESTRICTED_LUNCH_TERMS
-                if re.search(rf"\b{re.escape(term)}\b", f"{dish_name.lower()} {ingredients}")
-            ]
-            if restricted:
-                violations.append(f"{dish_name} contains restricted lunch ingredient: {restricted[0]}")
-    if len(lunch_dishes) >= 5 and len(set(lunch_dishes)) < 5:
-        violations.append("Weekday lunches must contain five distinct preparations")
-    return violations

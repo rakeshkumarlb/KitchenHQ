@@ -64,6 +64,14 @@ const JOB_META = {
 		frequency: 'daily',
 		time: '22:30',
 	},
+	weekly_plan_audit: {
+		label: 'Weekly plan audit',
+		agent: 'Food Inspector',
+		description: "Scores each not-yet-audited saved week against week-level rules (like lunch variety) that can't be judged from a single menu slot, with written feedback.",
+		schedule: 'Daily, 22:35',
+		frequency: 'daily',
+		time: '22:35',
+	},
 	task_audit: {
 		label: 'Task audit',
 		agent: 'Food Inspector',

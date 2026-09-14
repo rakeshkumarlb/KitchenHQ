@@ -371,10 +371,14 @@ def seed_if_empty(connection: sqlite3.Connection) -> None:
         )
     if _is_empty(connection, "weekly_menu"):
         connection.executemany(
-            "INSERT OR IGNORE INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO weekly_menu (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients, full_recipe, description) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (day, meal_type, dish, is_kid_friendly, macros, json.dumps(ingredients), json.dumps(full_recipe))
+                (
+                    day, meal_type, dish, is_kid_friendly, macros,
+                    json.dumps(ingredients), json.dumps(full_recipe),
+                    f"{dish} — a household favorite, ready in a few simple steps.",
+                )
                 for day, meals in _SEED_MENU.items()
                 for meal_type, dish, is_kid_friendly, macros, ingredients, full_recipe in meals
             ],

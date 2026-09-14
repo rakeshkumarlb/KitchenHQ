@@ -164,7 +164,7 @@ One React app, no router — `App.jsx` switch-renders each page from a single `/
 - **Inventory writes are propose-then-acknowledge.** The propose step never touches `inventory`; the acknowledge step is idempotent via a required `acknowledgement_key`. Replays return `{"replayed": true}` instead of double-counting.
 - **There is no "shopping list" entity** — `shopping_items` *is* the one pending list, unique on `item_name`. `add_shopping_items` is an upsert; acknowledging a purchase adds the real quantity to `inventory` and deletes the row.
 - **Prep deduction doesn't guard on stock** — a deduction always applies and can leave a visible negative balance until a shopping run. This is intentional.
-- **The weekly menu is policy-checked** — `validate_weekly_menu_policy` encodes the household's rules (no egg/meat/fish in lunches, five distinct weekday lunches); the `weekly_menu` job builds the week slot-by-slot and fixes up any violations before finishing.
+- **The weekly menu has no deterministic policy check** — `user_profile.restrictions` (household-editable on the Profile page; each entry scoped `per_meal` or `week`) is the only rule source. The Executive Chef reads it via `get_household_preferences` while planning, and the Food Inspector reads the same thing while auditing (`menu_audit` for per-meal rules, `weekly_plan_audit` for week-scope ones like lunch variety) — there is no synchronous gate before a plan is saved or emailed.
 
 ### Backups
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .registry import tool
+from .weekly_plan import parse_weekly_plan_row
 from ..db import connect, fetch_record
 
 
@@ -86,6 +87,49 @@ def record_prep_task_audit(prep_schedule_id: int, score: int, audit_feedback: st
         if cursor.rowcount == 0:
             raise ValueError(f"No detailed_prep_schedule record found for id {prep_schedule_id}")
     return fetch_record("detailed_prep_schedule", prep_schedule_id)
+
+
+@tool
+def get_unaudited_weekly_plans() -> list[dict[str, Any]]:
+    """Weekly-plan rows the Food Inspector has not yet scored (score IS NULL).
+
+    Each row is one planned week (see weekly_plans); a row is created/upserted
+    automatically whenever the weekly_menu job completes, so this reflects whichever
+    weeks still need a whole-plan judgement. Each row carries its own
+    skip_meals_snapshot/chef_note_snapshot/restrictions_snapshot - the exact household
+    context the Executive Chef planned this week under - use those to judge the week,
+    not a fresh get_household_preferences call (the live config may have changed since).
+    """
+    with connect() as connection:
+        return [
+            parse_weekly_plan_row(dict(row))
+            for row in connection.execute("SELECT * FROM weekly_plans WHERE score IS NULL ORDER BY id")
+        ]
+
+
+@tool
+def record_weekly_plan_audit(weekly_plan_id: int, score: int, audit_feedback: str) -> dict[str, Any]:
+    """Record the Food Inspector's judgement of one week's overall plan.
+
+    Judge against the row's own snapshot (get_unaudited_weekly_plans), not a fresh
+    get_household_preferences call: completeness (every slot skip_meals_snapshot didn't
+    exclude has a saved dish - call get_weekly_menu for the full saved week first),
+    restrictions_snapshot's "week"-scope entries (e.g. lunch variety), and whether the
+    week reflects chef_note_snapshot when it is non-empty. score: 0-100. audit_feedback:
+    a short written explanation - what the week's plan gets right and, if the score is
+    not perfect, exactly what it falls short on (a missing slot, an unmet restriction, or
+    an ignored chef note).
+    """
+    if not 0 <= score <= 100:
+        raise ValueError("score must be between 0 and 100")
+    with connect() as connection:
+        cursor = connection.execute(
+            "UPDATE weekly_plans SET score = ?, audit_feedback = ? WHERE id = ?",
+            (score, audit_feedback.strip(), weekly_plan_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"No weekly_plans record found for id {weekly_plan_id}")
+    return parse_weekly_plan_row(fetch_record("weekly_plans", weekly_plan_id))
 
 
 @tool

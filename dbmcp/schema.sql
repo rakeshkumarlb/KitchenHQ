@@ -24,18 +24,63 @@ CREATE TABLE IF NOT EXISTS weekly_menu (
     day_of_week TEXT NOT NULL,
     meal_type TEXT NOT NULL,
     dish_name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     is_kid_friendly BOOLEAN NOT NULL,
     macros TEXT NOT NULL,
     ingredients TEXT NOT NULL,
     full_recipe TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]',
+    source_recipe_id INTEGER REFERENCES recipes(id),
     score INTEGER CHECK (score BETWEEN 0 AND 100),
     audit_feedback TEXT,
+    is_skipped BOOLEAN NOT NULL DEFAULT 0,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 -- Exactly one row per (day_of_week, meal_type); the unique index makes
--- add_weekly_menu_item a true atomic upsert.
+-- add_weekly_menu_item a true atomic upsert. is_skipped marks a placeholder written by
+-- mark_weekly_menu_skipped for a slot the household's skip_meals config excluded this
+-- run, so a stale dish saved for that slot in an earlier week stops showing once it's
+-- skipped - add_weekly_menu_item always clears is_skipped back to 0 when a real dish is
+-- saved for the slot again. description is a short household-facing summary of the dish,
+-- shown on the Weekly Menu page's meal card in place of a raw ingredient/macro preview.
+-- tags is the same freeform taxonomy as recipes.tags (diet category, allergen/nutrition
+-- labels, cuisine/method), shown in the meal's recipe modal the same way the catalog
+-- shows a recipe's tags. source_recipe_id is a soft (unenforced) reference to the
+-- recipes catalog row this slot's dish was adapted from via search_recipes, if any - NULL
+-- when the dish was invented or transcribed fresh for this slot only. It is provenance,
+-- not a foreign key relationship the app relies on: recorded so a later "recreate
+-- instructions"/"identify tags" request for this slot knows which record is authoritative
+-- (the linked catalog recipe when set, this row directly when NULL) - see
+-- kitchendb/tools/weekly_menu.py::add_weekly_menu_item.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_day_meal
     ON weekly_menu (day_of_week, meal_type);
+
+CREATE TABLE IF NOT EXISTS weekly_plans (
+    id INTEGER PRIMARY KEY,
+    week_start_date TEXT NOT NULL,
+    week_end_date TEXT NOT NULL,
+    skip_meals_snapshot TEXT NOT NULL DEFAULT '{}',
+    chef_note_snapshot TEXT NOT NULL DEFAULT '',
+    restrictions_snapshot TEXT NOT NULL DEFAULT '[]',
+    score INTEGER CHECK (score BETWEEN 0 AND 100),
+    audit_feedback TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+-- One row per planned week (the weekly_menu job upserts it, keyed by week_start_date -
+-- the Monday - on every run; a re-plan resets score/audit_feedback to NULL, same
+-- convention as weekly_menu). skip_meals_snapshot/chef_note_snapshot/restrictions_snapshot
+-- are copies of user_profile.skip_meals/notes/restrictions (restrictions filtered to
+-- enabled: true) at the moment this week was planned - a record of what the Executive
+-- Chef actually saw, since the live config can change afterward. This is a deliberate
+-- exception to the rest of this schema's audits (weekly_menu, detailed_prep_schedule,
+-- recipes still judge against the household's current rules): weekly_plan_audit judges
+-- whole-week completeness against what was true at plan time, not what's true tonight.
+-- score/audit_feedback are the Food Inspector's judgement of this week's whole-plan,
+-- week-scope properties (e.g. lunch variety, slot completeness) that can't be judged from
+-- a single weekly_menu row in isolation - see get_unaudited_weekly_plans/record_weekly_plan_audit.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_plans_start
+    ON weekly_plans (week_start_date);
 
 CREATE TABLE IF NOT EXISTS detailed_prep_schedule (
     id INTEGER PRIMARY KEY,
@@ -104,8 +149,26 @@ CREATE TABLE IF NOT EXISTS user_profile (
     notes TEXT NOT NULL DEFAULT '',
     favorite_recipes TEXT NOT NULL DEFAULT '[]',
     notify_on_task_creation INTEGER NOT NULL DEFAULT 1,
+    restrictions TEXT NOT NULL DEFAULT '[
+        {"id":"no_nonveg_lunch","label":"No egg/meat/fish in lunches","category":"dietary","enabled":true,"scope":"per_meal"},
+        {"id":"lunch_variety","label":"Weekday lunches must be distinct","category":"variety","enabled":true,"value":5,"scope":"week"}
+    ]',
+    allow_recipe_invention INTEGER NOT NULL DEFAULT 1,
+    allow_unapproved_recipes INTEGER NOT NULL DEFAULT 1,
+    skip_meals TEXT NOT NULL DEFAULT '{}',
+    preferred_tags TEXT NOT NULL DEFAULT '[]',
+    excluded_tags TEXT NOT NULL DEFAULT '[]',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+-- restrictions: JSON list of {id, label, category, enabled, scope, value?} - household-
+-- configurable planning/judging rules. scope is "per_meal" (judged per weekly_menu row by
+-- menu_audit) or "week" (judged once per week, across the whole saved menu, by
+-- weekly_plan_audit - see the weekly_plans table below). value is an optional rule-
+-- specific parameter (e.g. lunch_variety's minimum distinct-preparations count). This
+-- list is read live by get_household_preferences - restrictions are never hardcoded in
+-- agent prompts or in a deterministic validator (see weekly_plans below for why).
+-- skip_meals: JSON object of {day_of_week: [meal_type, ...]} - slots the household wants
+-- left unplanned for that week (e.g. away from home), consulted by the weekly_menu job.
 
 CREATE TABLE IF NOT EXISTS household_members (
     id INTEGER PRIMARY KEY,
@@ -126,9 +189,11 @@ CREATE TABLE IF NOT EXISTS recipes (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
--- recipe: the full structured recipe (name, origin, serves, ingredients, instructions,
--- macros_per_serving, meal_types, tags, source) as JSON - the single source of truth for
--- that recipe's content. tags carries every descriptive label (diet category, allergen/
+-- recipe: the full structured recipe (name, description, origin, serves, ingredients,
+-- instructions, macros_per_serving, meal_types, tags, source) as JSON - the single
+-- source of truth for that recipe's content. description is a short (a sentence or two)
+-- household-facing summary of the dish, required like name. tags carries every
+-- descriptive label (diet category, allergen/
 -- restriction, nutrition character, etc) per the household's recipe catalog standards -
 -- there is no separate dietary_flags field. embedding: a JSON array of floats (one
 -- vector per recipe, built from the whole recipe text - see kitchendb/embeddings.py),

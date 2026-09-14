@@ -11,14 +11,12 @@ from __future__ import annotations
 import os
 
 from kitchendb import DATABASE_PATH, app, get_database_path, initialize_database
-from kitchendb.tools.weekly_menu import validate_weekly_menu_policy
 
 __all__ = [
     "app",
     "initialize_database",
     "DATABASE_PATH",
     "get_database_path",
-    "validate_weekly_menu_policy",
 ]
 
 

@@ -49,6 +49,7 @@ async def run_agent(
     job_name: str | None = None,
     require_tools: list[str | tuple[str, ...]] | None = None,
     require_tool_counts: dict[str, int] | None = None,
+    required_menu_slots: set[tuple[str, str]] | None = None,
     response_format: type | None = None,
 ) -> str:
     """Run one agent turn. `trace=True` is a debug aid (see cli.py) that returns a
@@ -61,6 +62,12 @@ async def run_agent(
     a `RuntimeError` is raised. Ignored when `trace=True`. An entry may itself be a tuple
     of alternative tool names when either one satisfies the requirement (no current job
     needs this, but the mechanism stays available for a future one that does).
+
+    `required_menu_slots` (only meaningful when `job_name == "weekly_menu"`) is the exact
+    set of (day_of_week, meal_type) slots this run must save via `add_weekly_menu_item` -
+    the full 28 minus whatever the household's `skip_meals` lists. Defaults to all 28
+    when not passed (jobs.py always passes it for the weekly_menu job; nothing else uses
+    this parameter).
 
     `response_format` overrides the per-role default (`RESPONSE_FORMATS[role]`) — jobs.py
     passes one so a job always returns structured JSON even for roles whose chat replies
@@ -95,7 +102,7 @@ async def run_agent(
             structured_response = result.get("structured_response")
 
             for attempt in range(1, _MAX_FOLLOWUPS + 1):
-                shortfalls = _all_shortfalls(job_name, require_tools, require_tool_counts, result_messages)
+                shortfalls = _all_shortfalls(job_name, require_tools, require_tool_counts, required_menu_slots, result_messages)
                 if not shortfalls:
                     break
                 logger.warning(
@@ -116,7 +123,7 @@ async def run_agent(
                 result_messages = result["messages"]
                 structured_response = result.get("structured_response")
 
-            shortfalls = _all_shortfalls(job_name, require_tools, require_tool_counts, result_messages)
+            shortfalls = _all_shortfalls(job_name, require_tools, require_tool_counts, required_menu_slots, result_messages)
             if shortfalls:
                 raise RuntimeError(
                     f"job {job_name} still incomplete after {_MAX_FOLLOWUPS} follow-ups: "
@@ -190,16 +197,17 @@ def _tool_shortfalls(
     return shortfalls
 
 
-_ALL_MENU_SLOTS = {(day, meal) for day in DAYS for meal in MEAL_TYPES}
+ALL_MENU_SLOTS: frozenset[tuple[str, str]] = frozenset((day, meal) for day in DAYS for meal in MEAL_TYPES)
 
 
-def _weekly_menu_slot_shortfall(messages: list[Any]) -> list[str]:
+def _weekly_menu_slot_shortfall(messages: list[Any], required_slots: set[tuple[str, str]]) -> list[str]:
     """The distinct (day, meal) slots the weekly_menu run still hasn't saved.
 
-    `_tool_shortfalls` only counts *how many* add_weekly_menu_item calls were made, so
-    a run that re-saved five weekday slots eight times reaches 28 calls while Saturday
-    and Sunday stay untouched. This checks the actual arguments and requires all 28
-    distinct Monday-Sunday slots.
+    `_tool_shortfalls` only counts *how many* add_weekly_menu_item calls were made, so a
+    run that re-saved five weekday slots eight times reaches the required count while
+    other required slots stay untouched. This checks the actual arguments and requires
+    every slot in `required_slots` (the full 28 minus whatever the household's
+    skip_meals lists - see jobs.py::run_job) to have been saved at least once.
     """
     saved: set[tuple[str, str]] = set()
     for message in messages:
@@ -214,9 +222,9 @@ def _weekly_menu_slot_shortfall(messages: list[Any]) -> list[str]:
                 str(args.get("day_of_week", "")).strip().lower(),
                 str(args.get("meal_type", "")).strip().lower(),
             )
-            if slot in _ALL_MENU_SLOTS:
+            if slot in ALL_MENU_SLOTS:
                 saved.add(slot)
-    missing = _ALL_MENU_SLOTS - saved
+    missing = required_slots - saved
     if not missing:
         return []
     preview = ", ".join(f"{day} {meal}" for day, meal in sorted(missing))
@@ -227,11 +235,12 @@ def _all_shortfalls(
     job_name: str | None,
     require_tools: list[str | tuple[str, ...]] | None,
     require_tool_counts: dict[str, int] | None,
+    required_menu_slots: set[tuple[str, str]] | None,
     messages: list[Any],
 ) -> list[str]:
     shortfalls = _tool_shortfalls(require_tools, require_tool_counts, messages)
     if job_name == "weekly_menu":
-        shortfalls += _weekly_menu_slot_shortfall(messages)
+        shortfalls += _weekly_menu_slot_shortfall(messages, required_menu_slots if required_menu_slots is not None else ALL_MENU_SLOTS)
     return shortfalls
 
 

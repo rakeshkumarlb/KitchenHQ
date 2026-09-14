@@ -19,7 +19,7 @@ from .registry import tool
 from ..db import connect, fetch_record
 from ..embeddings import cosine_top_k, embed_text, embedding_text_for
 from ..keyword_search import fts_fields_for, keyword_top_k
-from ..validation import clean_line_list, normalize_ingredients_used
+from ..validation import clean_line_list, clean_short_text, normalize_ingredients_used
 
 # A recipe qualifies for search_recipes' results if its keyword score OR its semantic
 # score clears this bar; neither is required to be exact, but a recipe both signals
@@ -31,6 +31,7 @@ def _validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
     name = str(recipe.get("name", "")).strip()
     if not name:
         raise ValueError("recipe.name must not be empty")
+    description = clean_short_text(recipe.get("description", ""), field="recipe.description", required=True)
     ingredients = normalize_ingredients_used(recipe.get("ingredients"))
     if not ingredients:
         raise ValueError("recipe.ingredients must contain at least one item")
@@ -50,6 +51,7 @@ def _validate_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("recipe.serves must be at least 1")
     return {
         "name": name,
+        "description": description,
         "origin": str(recipe.get("origin", "")).strip(),
         "serves": serves,
         "prep_time_minutes": recipe.get("prep_time_minutes"),
@@ -80,12 +82,13 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 def add_recipe(recipe: dict[str, Any]) -> dict[str, Any]:
     """Add a recipe to the household catalog.
 
-    `recipe` is the full structured recipe: name, origin, serves, prep_time_minutes,
-    cook_time_minutes, ingredients ([{item_name, quantity, unit}]), instructions
-    (ordered plain-text steps), macros_per_serving, meal_types (each one of
-    "breakfast"/"lunch"/"snack"/"dinner"), tags, source. Its embedding is computed
-    automatically from the whole recipe text, so it's searchable via search_recipes
-    immediately.
+    `recipe` is the full structured recipe: name, description (a short one-to-two
+    sentence household-facing summary of the dish - what it is, its character; required,
+    like name), origin, serves, prep_time_minutes, cook_time_minutes, ingredients
+    ([{item_name, quantity, unit}]), instructions (ordered plain-text steps),
+    macros_per_serving, meal_types (each one of "breakfast"/"lunch"/"snack"/"dinner"),
+    tags, source. Its embedding is computed automatically from the whole recipe text
+    (description included), so it's searchable via search_recipes immediately.
 
     tags is the one field for every reusable, searchable fact about this dish that
     isn't already a dedicated field - diet category (exactly one explicit tag from the

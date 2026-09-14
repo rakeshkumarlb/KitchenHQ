@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
+import httpx
 from pydantic import ValidationError
 
 from .config import Settings
-from .kitchen_agent import run_agent
+from .job_context import build_job_context
+from .kitchen_agent import ALL_MENU_SLOTS, run_agent
 from .models import ExecutiveChefResult, FoodInspectorResult, PantryManagerResult, SousChefResult
 from .telemetry import record_agent_run
+from .weekly_plan import record_skipped_menu_slots, record_weekly_plan
 
 logger = logging.getLogger("kitchenhq-agent")
 
@@ -25,15 +29,14 @@ _PREP_STEPS = """\
 
 SCHEDULED_REQUESTS = {
     "weekly_menu": """\
-PURPOSE: replace the saved weekly menu with a fresh, complete plan for the coming Monday-to-Sunday week - 28 slots: all seven days (Monday, Tuesday, Wednesday, Thursday, Friday, Saturday AND Sunday) x breakfast, lunch, snack, dinner.
+PURPOSE: replace the saved weekly menu with a fresh, complete plan for the coming Monday-to-Sunday week - {slot_count} required slots: all seven days (Monday, Tuesday, Wednesday, Thursday, Friday, Saturday AND Sunday) x breakfast, lunch, snack, dinner{skip_note}.
 1. Call get_job_context.
-2. Call get_household_preferences. The chef note and favourite dishes are OPTIONAL - if empty, ignore them and continue; do not stop.
+2. Call get_household_preferences. Its `restrictions` list is the authoritative rule set - there is no separate deterministic check, so honor every entry with `enabled: true` up front rather than discovering a conflict later. Its `skip_meals` lists any day/meal slots the household wants left unplanned this week - do NOT call add_weekly_menu_item for those. The chef note and favourite dishes are OPTIONAL - if empty, ignore them and continue; do not stop.
 3. Call get_inventory, then get_weekly_menu to see what is currently saved.
-4. For each slot, call search_recipes for a candidate dish before deciding on it; adapt a relevant match to the household's preferences and inventory rather than inventing unaided, and plan from scratch only when nothing relevant comes back. Decide a dish for every one of the 28 slots, including Saturday and Sunday - plan the weekend fresh, do not leave the currently-saved weekend dishes in place. Rules: follow every dietary and macro rule; lunches must be vegetarian with NO egg, meat or fish and there must be at least 5 DISTINCT lunch dishes across the week; chicken only at dinner.
-5. Save each slot with its own add_weekly_menu_item call (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients as a list of ingredient strings, full_recipe as a list of method-step strings). Overwriting an existing slot is expected. Saving all 28 DISTINCT day/meal slots is the required outcome - you are not finished until every one of the seven days has all four meals saved.
-6. Call validate_weekly_menu_policy with no arguments to check the saved week. If it returns violations, fix those slots with more add_weekly_menu_item calls and validate again, until it returns valid.
-7. Call send_weekly_plan_email: week_start and week_end are the first and last dates in job.target_menu_days; considerations is your reasoning (favourites used, how the rules were met, inventory gaps); shopping_needs is the ingredients likely to be bought. Do NOT pass days - the tool reads the saved menu itself.
-8. Reply in plain text with a two-sentence summary of the week and whether the email sent.""",
+4. For each required slot (every slot except the ones skip_meals lists), call search_recipes for a candidate dish before deciding on it; adapt a relevant match to the household's preferences and inventory rather than inventing unaided, and plan from scratch only when nothing relevant comes back. Note the matched recipe's id for step 5 whenever you adapt one. Decide a dish for every required slot, including Saturday and Sunday - plan the weekend fresh, do not leave the currently-saved weekend dishes in place. Follow every dietary and macro rule and every enabled restriction from step 2; chicken only at dinner.
+5. Save each required slot with its own add_weekly_menu_item call (day_of_week, meal_type, dish_name, is_kid_friendly, macros, ingredients as a list of ingredient strings, description as a short one-to-two sentence summary of the dish, full_recipe as a list of method-step strings, and source_recipe_id set to step 4's matched recipe id when the dish was adapted from one, left unset when invented from scratch). Overwriting an existing slot is expected. Saving all {slot_count} DISTINCT required day/meal slots is the required outcome - you are not finished until every one of them has been saved.
+6. Call send_weekly_plan_email: week_start and week_end are the first and last dates in job.target_menu_days; considerations is your reasoning (favourites used, how the rules were met, inventory gaps); shopping_needs is the ingredients likely to be bought. Do NOT pass days - the tool reads the saved menu itself.
+7. Reply in plain text with a two-sentence summary of the week and whether the email sent.""",
     "sunday_prep": "PURPOSE: one batch-prep session that makes the coming week's cooking faster.\n1. Call get_job_context.\n"
     + _PREP_STEPS.format(meal_scope="the meals", day_phrase="the coming week", time_cap="cap 60 minutes"),
     "nightly_prep": "PURPOSE: a small prep task tonight so tomorrow morning's cooking is quick.\n1. Call get_job_context.\n"
@@ -53,10 +56,17 @@ PURPOSE: propose a shopping list for whatever is running low or needed for the c
     "menu_audit": """\
 PURPOSE: judge every weekly_menu row not yet scored against the same rules and preferences the Executive Chef used.
 1. Call get_job_context.
-2. Call get_household_preferences so you judge against the same chef note, favourites, and household members' preferences/conditions the Executive Chef had.
+2. Call get_household_preferences so you judge against the same chef note, favourites, restrictions, and household members' preferences/conditions the Executive Chef had.
 3. Call get_unaudited_weekly_menu_items. If it returns nothing, there is nothing to audit this run - say so and stop.
-4. For every row returned, judge it against the dietary/macro rules (lunches vegetarian with no egg/meat/fish, chicken dinner-only, etc.) and the household context from step 2 - including whether the ingredient quantities look scaled for the household (household_members count) and whether the dish/instructions were actually adapted to a member's preference or health condition, not just nutritionally fine in general - then call record_weekly_menu_audit(weekly_menu_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
+4. For every row returned, judge it against the dietary/macro rules, every `per_meal`-scope entry in step 2's `restrictions` with `enabled: true` (a `week`-scope entry like lunch variety is judged separately, across the whole saved week, by the weekly_plan_audit job - not here), chicken dinner-only, and the household context from step 2 - including whether the ingredient quantities look scaled for the household (household_members count) and whether the dish/instructions were actually adapted to a member's preference or health condition, not just nutritionally fine in general - then call record_weekly_menu_audit(weekly_menu_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what it got right and, if imperfect, exactly what it falls short on. Do this for every row from step 3; do not stop partway.
 5. Reply with a short summary of how many rows you scored and any repeat issue worth flagging.""",
+    "weekly_plan_audit": """\
+PURPOSE: judge every weekly_plans row not yet scored for completeness and rule-compliance against the exact context that week was planned under - the whole-week properties that can't be judged from any single weekly_menu row alone.
+1. Call get_job_context.
+2. Call get_unaudited_weekly_plans. If it returns nothing, there is nothing to audit this run - say so and stop. Do NOT call get_household_preferences for this job - each row's own skip_meals_snapshot/chef_note_snapshot/restrictions_snapshot IS the authoritative context for that week (what the Executive Chef actually saw), not whatever the household has changed to since.
+3. For every row returned, call get_weekly_menu to see that week's full saved menu, then judge three things: (a) completeness - every (day, meal_type) slot NOT listed in that row's skip_meals_snapshot must have a saved dish for that week; a missing required slot is a hard fault; (b) every `week`-scope entry in that row's restrictions_snapshot (e.g. lunch_variety - count the actual distinct weekday lunch dishes and compare against its `value`) - ignore `per_meal`-scope entries here, those were already judged per row by menu_audit against live rules; (c) when chef_note_snapshot is non-empty, whether the week's dishes plausibly reflect it.
+4. Call record_weekly_plan_audit(weekly_plan_id, score, audit_feedback) for that row - score 0-100, audit_feedback naming what the week's plan got right and, if imperfect, exactly what it falls short on (a missing slot, an unmet restriction, or an ignored chef note). Do this for every row from step 2; do not stop partway.
+5. Reply with a short summary of how many weeks you scored and any repeat issue worth flagging.""",
     "task_audit": """\
 PURPOSE: judge every detailed_prep_schedule row not yet scored against the same rules and preferences the Sous Chef used.
 1. Call get_job_context.
@@ -85,6 +95,7 @@ JOB_ROLES = {
     "dinner_cooking": "sous_chef",
     "pantry_manager": "pantry_manager",
     "menu_audit": "food_inspector",
+    "weekly_plan_audit": "food_inspector",
     "task_audit": "food_inspector",
     "expire_prep_tasks": "sous_chef",
     "recipe_audit": "food_inspector",
@@ -100,6 +111,7 @@ JOB_RESULT_MODELS = {
     "dinner_cooking": SousChefResult,
     "pantry_manager": PantryManagerResult,
     "menu_audit": FoodInspectorResult,
+    "weekly_plan_audit": FoodInspectorResult,
     "task_audit": FoodInspectorResult,
     "expire_prep_tasks": SousChefResult,
     "recipe_audit": FoodInspectorResult,
@@ -109,10 +121,14 @@ JOB_RESULT_MODELS = {
 # corrective nudges (see _MAX_FOLLOWUPS) and finally raises rather than recording an
 # empty "completed" run. REQUIRED_TOOLS = must be called at least once (an entry may be
 # a tuple of alternative tool names, satisfied by calling any one of them); REQUIRED_TOOL_COUNTS
-# = must be called at least N times (a full week is 28 add_weekly_menu_item slots). The
-# email tools are deliberately not required - a missed email must never fail the job.
+# = must be called at least N times (weekly_menu needs one add_weekly_menu_item call per
+# required slot - up to 28, fewer if skip_meals excludes some - computed per-run in
+# run_job, not fixed here). The email tools are deliberately not required - a missed
+# email must never fail the job.
 JOB_REQUIRED_TOOLS = {
-    "weekly_menu": ["validate_weekly_menu_policy"],
+    # No deterministic policy gate - get_household_preferences' `restrictions` is now the
+    # only rule source, so it's required directly rather than a validator tool call.
+    "weekly_menu": ["get_household_preferences"],
     "sunday_prep": ["add_detailed_prep_schedule"],
     "nightly_prep": ["add_detailed_prep_schedule"],
     "morning_cooking": ["add_detailed_prep_schedule"],
@@ -122,14 +138,57 @@ JOB_REQUIRED_TOOLS = {
     # run to run (some nights there's nothing new to score), so record_*_audit isn't a
     # hard requirement the way add_weekly_menu_item's 28 slots are.
     "menu_audit": ["get_unaudited_weekly_menu_items"],
+    "weekly_plan_audit": ["get_unaudited_weekly_plans"],
     "task_audit": ["get_unaudited_prep_tasks"],
     "expire_prep_tasks": ["expire_stale_prep_tasks"],
     "recipe_audit": ["get_unaudited_recipes"],
 }
 
-JOB_REQUIRED_TOOL_COUNTS = {
-    "weekly_menu": {"add_weekly_menu_item": 28},
-}
+# weekly_menu's count is computed per-run in run_job (28 minus whatever skip_meals
+# lists), not fixed here - see _fetch_skip_meals/_required_menu_slots below.
+JOB_REQUIRED_TOOL_COUNTS: dict[str, dict[str, int]] = {}
+
+
+async def _fetch_planning_snapshot(settings: Settings) -> dict[str, Any]:
+    """The household's configured skip_meals/chef note/enabled restrictions right now.
+
+    Fetched once before the weekly_menu job runs and threaded through to
+    record_weekly_plan afterward, so weekly_plans' snapshot reflects the exact context
+    the Executive Chef planned this week under - not whatever the household edits later.
+    Best-effort, same pattern as telemetry.py's record_agent_run - a fetch failure just
+    means nothing is treated as skipped/noted/restricted (the full 28-slot week is still
+    required), never a reason to fail the job outright.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{settings.db_api_url}/api/dashboard",
+                headers={"X-API-Key": settings.kitchenhq_api_key},
+            )
+            response.raise_for_status()
+        profile = response.json().get("profile") or {}
+        skip_meals = profile.get("skip_meals")
+        restrictions = profile.get("restrictions")
+        return {
+            "skip_meals": skip_meals if isinstance(skip_meals, dict) else {},
+            "chef_note": str(profile.get("notes") or ""),
+            "restrictions": [
+                entry for entry in (restrictions if isinstance(restrictions, list) else [])
+                if isinstance(entry, dict) and entry.get("enabled")
+            ],
+        }
+    except Exception:
+        logger.warning("Could not fetch planning context for weekly_menu job; planning the full week", exc_info=True)
+        return {"skip_meals": {}, "chef_note": "", "restrictions": []}
+
+
+def _required_menu_slots(skip_meals: dict[str, list[str]]) -> set[tuple[str, str]]:
+    skipped = {
+        (str(day).strip().lower(), str(meal).strip().lower())
+        for day, meals in (skip_meals or {}).items()
+        for meal in meals or []
+    }
+    return set(ALL_MENU_SLOTS) - skipped
 
 
 async def run_job(job_name: str, settings: Settings) -> str:
@@ -143,13 +202,28 @@ async def run_job(job_name: str, settings: Settings) -> str:
     role = JOB_ROLES[job_name]
     request = SCHEDULED_REQUESTS[job_name]
     result_model = JOB_RESULT_MODELS.get(job_name)
+    require_tool_counts = JOB_REQUIRED_TOOL_COUNTS.get(job_name)
+    required_menu_slots = None
+    if job_name == "weekly_menu":
+        planning_snapshot = await _fetch_planning_snapshot(settings)
+        required_menu_slots = _required_menu_slots(planning_snapshot["skip_meals"])
+        skipped_count = len(ALL_MENU_SLOTS) - len(required_menu_slots)
+        skip_note = f", except {skipped_count} slot(s) the household has marked skipped this week" if skipped_count else ""
+        request = request.format(slot_count=len(required_menu_slots), skip_note=skip_note)
+        require_tool_counts = {"add_weekly_menu_item": len(required_menu_slots)}
+        # Written before the agent runs (not after) so a stale dish from an earlier week
+        # is already replaced by the time the agent's own send_weekly_plan_email call
+        # (mid-run) reads the saved menu back - independent of whether this run's
+        # planning ultimately succeeds, since skip_meals is the household's own config.
+        await record_skipped_menu_slots(settings, sorted(ALL_MENU_SLOTS - required_menu_slots))
     logger.info("Running job: %s (role=%s)", job_name, role)
     try:
         result = await run_agent(
             role, request, settings,
             remember=False, trace=False, job_name=job_name,
             require_tools=JOB_REQUIRED_TOOLS.get(job_name),
-            require_tool_counts=JOB_REQUIRED_TOOL_COUNTS.get(job_name),
+            require_tool_counts=require_tool_counts,
+            required_menu_slots=required_menu_slots,
             response_format=result_model,
         )
         if result_model is not None:
@@ -168,6 +242,14 @@ async def run_job(job_name: str, settings: Settings) -> str:
                     job_name, validation_error,
                 )
         logger.info("Job %s completed", job_name)
+        if job_name == "weekly_menu":
+            # Deterministic, not an LLM tool call - target_menu_days is already resolved
+            # by get_job_context's own logic, no re-derivation or agent involvement.
+            target_days = build_job_context(settings, "weekly_menu")["job"]["target_menu_days"]
+            await record_weekly_plan(
+                settings, target_days[0]["date"], target_days[-1]["date"],
+                planning_snapshot["skip_meals"], planning_snapshot["chef_note"], planning_snapshot["restrictions"],
+            )
         await record_agent_run(role, job_name, "completed", settings, result=result)
         return result
     except Exception as error:
