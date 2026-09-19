@@ -259,7 +259,7 @@ export default function Profile({ data, onSave, onAddMember, onUpdateMember, onD
   };
 
   return <div className="page-content">
-    <div className="page-lead"><div><p className="eyebrow">Household</p><h2>Your <em>profile.</em></h2><p>Who the kitchen is planning for, what it should avoid, and when to skip a meal.</p></div></div>
+    <div className="page-lead"><div><p>Who the kitchen is planning for, what it should avoid, and when to skip a meal.</p></div></div>
 
     <nav className="pantry-tabs soft-inset">
       {PROFILE_TABS.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={activeTab === id ? 'active' : ''} onClick={() => setActiveTab(id)}><Icon size={15} strokeWidth={1.8} /> {label}</button>)}

@@ -180,13 +180,6 @@ export default function WeeklyMenu({ data, onRefresh }) {
 	};
 
 	return <div className="page-content">
-		<div className="page-lead">
-			<div><h2>Weekly <em>menu.</em></h2><p>Four thoughtful moments each day, built around what is already in your pantry.</p></div>
-			<div className="page-lead-actions">
-				<button className="secondary-button" onClick={refresh} disabled={refreshing}><RefreshCw className={refreshing ? 'spin' : undefined} size={16} /> {refreshing ? 'Refreshing...' : 'Refresh'}</button>
-				<button className="secondary-button">Export menu <ChevronRight size={16} /></button>
-			</div>
-		</div>
 		{error && <div className="chat-error" role="alert"><span>{error}</span></div>}
 		<WeeklyPlanSummary plan={currentPlan} days={days} mealTypes={mealTypesRaw} />
 		<div className="day-groups">{days.map((day, dayIndex) => <section className="day-group" key={day}>

@@ -169,7 +169,7 @@ export default function Automations() {
 
 	return <div className="page-content">
 		<div className="page-lead">
-			<div><p className="eyebrow">Autonomous jobs</p><h2>Automa<em>tions.</em></h2><p>Trigger any scheduled job on demand and see exactly what the agent did.</p></div>
+			<div><p>Trigger any scheduled job on demand and see exactly what the agent did.</p></div>
 		</div>
 		{error && <div className="chat-error" role="alert"><span>{error}</span></div>}
 		<section className="task-group">

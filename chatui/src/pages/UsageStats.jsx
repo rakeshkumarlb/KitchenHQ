@@ -53,7 +53,7 @@ export default function UsageStats() {
 
 	return <div className="page-content">
 		<div className="page-lead">
-			<div><p className="eyebrow">Agent telemetry</p><h2>Usage <em>stats.</em></h2><p>Token usage and context size across every scheduled and on-demand agent run.</p></div>
+			<div><p>Token usage and context size across every scheduled and on-demand agent run.</p></div>
 		</div>
 		{error && <div className="chat-error" role="alert"><span>{error}</span></div>}
 

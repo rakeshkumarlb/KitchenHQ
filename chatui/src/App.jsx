@@ -15,14 +15,14 @@ import { kitchenApi, getApiKey, setApiKey } from './services/api';
 
 const pageMeta = {
   dashboard: ['Good morning, Alex', 'Your kitchen at a glance'],
-  pantry: ['Pantry', 'Keep the good stuff moving'],
-  menu: ['Weekly Menu', 'Five days, thoughtfully planned'],
-  recipes: ['Recipes', 'The household catalog'],
-  tasks: ['Task List', 'A little prep goes a long way'],
+  pantry: [<>Pantry, <em>in hand.</em></>, 'The fresh shelf'],
+  menu: [<>Weekly <em>menu.</em></>, 'Five days, thoughtfully planned'],
+  recipes: [<>Recipe <em>catalog.</em></>, 'The household catalog'],
+  tasks: [<>Task <em>list.</em></>, 'The prep rhythm'],
   chat: ['Chat', 'Your Executive Chef is almost ready'],
-  automations: ['Automations', 'Run the autonomous agents on demand'],
-  usage: ['Usage Stats', 'Token usage across every agent run'],
-  profile: ['Profile', 'Your household details'],
+  automations: [<>Automa<em>tions.</em></>, 'Autonomous jobs'],
+  usage: [<>Usage <em>stats.</em></>, 'Agent telemetry'],
+  profile: [<>Your <em>profile.</em></>, 'Household'],
 };
 
 const fallback = { inventory: [], menu: [], tasks: [], shopping_items: [], consumption: [], profile: {}, household_members: [] };

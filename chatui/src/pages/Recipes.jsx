@@ -163,10 +163,6 @@ export default function Recipes() {
   };
 
   return <div className="page-content">
-    <div className="page-lead">
-      <div><p className="eyebrow">The household catalog</p><h2>Recipe <em>catalog.</em></h2><p>Search by ingredient or vibe. Paste a recipe to the Executive Chef in chat to add it here.</p></div>
-    </div>
-
     {error && <div className="chat-error" role="alert"><span>{error}</span></div>}
 
     <form className="recipe-search" onSubmit={runSearch}>

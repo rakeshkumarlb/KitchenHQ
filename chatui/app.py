@@ -119,7 +119,7 @@ async def delete_household_member(member_id: int) -> dict:
 
 
 @app.post("/api/shopping-items")
-async def add_shopping_items(payload: dict) -> dict:
+async def add_shopping_items(payload: dict) -> list[dict]:
     return await db_request("POST", "/api/shopping-items", payload)
 
 
