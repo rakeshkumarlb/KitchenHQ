@@ -52,13 +52,10 @@ export default function UsageStats() {
 	const agentRoles = Object.keys(breakdown.by_agent || {});
 
 	return <div className="page-content">
-		<div className="page-lead">
-			<div><p>Token usage and context size across every scheduled and on-demand agent run.</p></div>
-		</div>
 		{error && <div className="chat-error" role="alert"><span>{error}</span></div>}
 
 		<section className="task-group">
-			<h3>Weekly usage (last 7 days)</h3>
+			<h3>Weekly usage <em>(last 7 days)</em></h3>
 			<div className="usage-chart-card soft-outset">
 				{daily.length ? <>
 					<div className="usage-bar-chart">

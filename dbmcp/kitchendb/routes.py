@@ -111,6 +111,7 @@ def dashboard() -> dict[str, Any]:
                 for row in connection.execute("SELECT * FROM household_members ORDER BY id")
             ],
             "weekly_plans": get_weekly_plans(),
+            "recipe_count": connection.execute("SELECT COUNT(*) FROM recipes").fetchone()[0],
             # Day / meal / tag vocabulary for non-Python clients (the chatui React app) -
             # the single source of truth is shared/constants.py and shared/tags.py,
             # vendored here as constants.py and tags.py.

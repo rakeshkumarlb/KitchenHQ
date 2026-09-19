@@ -113,13 +113,15 @@ function WeeklyPlanSummary({ plan, days, mealTypes }) {
 	const start = formatMenuDate(plan.week_start_date);
 	const end = formatMenuDate(plan.week_end_date);
 	const restrictions = plan.restrictions_snapshot || [];
-	return <section className="content-card soft-outset weekly-plan-summary">
-		<div className="card-heading">
-			<div><p className="eyebrow">This week's plan</p><h3>{start}{end ? ` – ${end}` : ''}</h3></div>
-			<AuditBadge score={plan.score} />
-		</div>
-		<p className="muted-copy">{plan.audit_feedback || 'Not yet reviewed by the Food Inspector.'}</p>
-		<div className="plan-snapshot">
+	return <section className="weekly-plan-grid">
+		<article className="content-card soft-outset weekly-plan-summary">
+			<div className="card-heading">
+				<div><p className="eyebrow">This week's plan</p><h3>{start}{end ? ` – ${end}` : ''}</h3></div>
+				<AuditBadge score={plan.score} />
+			</div>
+			<p className="muted-copy">{plan.audit_feedback || 'Not yet reviewed by the Food Inspector.'}</p>
+		</article>
+		<article className="content-card soft-outset weekly-plan-summary">
 			<p className="eyebrow">Planned under</p>
 			<p className="muted-copy">{plan.chef_note_snapshot || 'No chef note at plan time.'}</p>
 			<div className="macro-row">
@@ -128,7 +130,7 @@ function WeeklyPlanSummary({ plan, days, mealTypes }) {
 					: <span>No restrictions enabled</span>}
 			</div>
 			<SkipMealsGrid days={days} mealTypes={mealTypes} skipMeals={plan.skip_meals_snapshot || {}} />
-		</div>
+		</article>
 	</section>;
 }
 

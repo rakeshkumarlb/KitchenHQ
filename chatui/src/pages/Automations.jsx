@@ -168,12 +168,9 @@ export default function Automations() {
 	jobsByAgent.forEach((group) => group.jobs.sort(byExecutionTime));
 
 	return <div className="page-content">
-		<div className="page-lead">
-			<div><p>Trigger any scheduled job on demand and see exactly what the agent did.</p></div>
-		</div>
 		{error && <div className="chat-error" role="alert"><span>{error}</span></div>}
 		<section className="task-group">
-			<h3>Run now</h3>
+			<h3>RUN <em>NOW!</em></h3>
 			{jobsByAgent.map(({ agent, jobs: agentJobs }) => (
 				<div className="automation-agent-group" key={agent}>
 					<h4>{agent}</h4>
@@ -185,7 +182,7 @@ export default function Automations() {
 									<b>{meta.label}</b>
 								</div>
 								<p className="automation-job-desc">{meta.description}</p>
-								<p className="automation-job-schedule"><Clock3 size={13} /> {meta.schedule}</p>
+								<p className="automation-job-schedule"><Clock3 size={13} /> {meta.schedule}</p><br />
 								<button type="button" className="secondary-button automation-job-run" disabled={running === jobName} onClick={() => invoke(jobName)}>
 									{running === jobName ? <LoaderCircle className="spin" size={15} /> : <PlayCircle size={15} />}
 									{running === jobName ? 'Running...' : 'Run now'}

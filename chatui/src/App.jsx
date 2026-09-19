@@ -14,15 +14,15 @@ import Profile from './pages/Profile';
 import { kitchenApi, getApiKey, setApiKey } from './services/api';
 
 const pageMeta = {
-  dashboard: ['Good morning, Alex', 'Your kitchen at a glance'],
-  pantry: [<>Pantry, <em>in hand.</em></>, 'The fresh shelf'],
-  menu: [<>Weekly <em>menu.</em></>, 'Five days, thoughtfully planned'],
-  recipes: [<>Recipe <em>catalog.</em></>, 'The household catalog'],
-  tasks: [<>Task <em>list.</em></>, 'The prep rhythm'],
-  chat: ['Chat', 'Your Executive Chef is almost ready'],
-  automations: [<>Automa<em>tions.</em></>, 'Autonomous jobs'],
-  usage: [<>Usage <em>stats.</em></>, 'Agent telemetry'],
-  profile: [<>Your <em>profile.</em></>, 'Household'],
+  dashboard: [<>Good morning, <em></em></>, 'Your kitchen at a glance'],
+  pantry: [<>Pantry, <em>in hand.</em></>, 'What you have, what you need, and what to do about it'],
+  menu: [<>Weekly <em>menu.</em></>, 'Your week, thoughtfully planned'],
+  recipes: [<>Recipe <em>catalog.</em></>, 'The household recipe catalog'],
+  tasks: [<>Task <em>list.</em></>, 'Follow me and everything will be all right!'],
+  chat: [<>Chat<em> with your Executive Chef</em></>, 'Ask Anything!'],
+  automations: [<>Automa<em>tions.</em></>, 'Run your kitchen like clockwork'],
+  usage: [<>Usage <em>stats.</em></>, 'See what it costs to run your kitchen'],
+  profile: [<>Your <em>profile.</em></>, 'Tell AI about your household and kitchen preferences'],
 };
 
 const fallback = { inventory: [], menu: [], tasks: [], shopping_items: [], consumption: [], profile: {}, household_members: [] };
@@ -67,7 +67,7 @@ export default function App() {
   const deleteMember = async (id) => { try { setError(''); await kitchenApi.deleteHouseholdMember(id); await load(); } catch (e) { setError(e.message); } };
   const firstName = (data.profile?.name || '').trim().split(/\s+/)[0];
   const [rawTitle, eyebrow] = pageMeta[page];
-  const title = page === 'dashboard' && firstName ? `Good morning, ${firstName}` : rawTitle;
+  const title = page === 'dashboard' && firstName ? <>Good Morning, <em>{firstName}</em></> : rawTitle;
   const content = { dashboard: <Dashboard data={data} navigate={setPage} />, pantry: <Pantry data={data} onAddToShopping={addToShopping} onDeleteShoppingItem={deleteShoppingItem} onInvokePantryManager={invokePantryManager} onAcknowledgeShopping={acknowledgeShopping} onRefresh={load} />, menu: <WeeklyMenu data={data} onRefresh={load} />, recipes: <Recipes />, tasks: <TaskList data={data} onToggle={toggle} onCancel={cancelTask} onRefresh={load} />, chat: <Chat />, automations: <Automations />, usage: <UsageStats />, profile: <Profile data={data} onSave={saveProfile} onAddMember={addMember} onUpdateMember={updateMember} onDeleteMember={deleteMember} /> }[page];
   return <div className="app-shell"><Sidebar page={page} onNavigate={(next) => { setPage(next); setMobileNav(false); }} open={mobileNav} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} /><main className="main"><PageHeader title={title} eyebrow={eyebrow} profileName={data.profile?.name} onRefresh={load} onMenu={() => setMobileNav(!mobileNav)} />{error && <div className="error-banner">Could not refresh kitchen data: {error}</div>}{content}</main></div>;
 }
