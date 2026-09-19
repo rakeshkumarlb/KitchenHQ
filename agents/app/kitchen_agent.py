@@ -10,6 +10,7 @@ each other.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from langchain.agents import create_agent
@@ -38,6 +39,45 @@ _RECURSION_LIMIT = 60
 _MAX_FOLLOWUPS = 3
 
 
+@dataclass
+class AgentReply:
+    """One run's reply plus best-effort token usage aggregated across every LLM call
+    the run made (the initial call, any corrective nudges, and the final wrap-up ask -
+    see `_all_shortfalls`/`_last_assistant_text` below). `context_length` is the peak
+    single-call prompt size seen anywhere in the run - how close it got to the model's
+    context window, not a sum. All four are `None` when the provider never reported
+    `usage_metadata` (e.g. some Ollama versions) - never a reason to fail the run."""
+
+    text: str
+    context_length: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+def _usage_from_new_messages(messages: list[Any], prior_len: int) -> list[dict[str, int]]:
+    """usage_metadata dicts for AIMessages added by the most recent agent.ainvoke call
+    (i.e. messages[prior_len:]) - never from history/earlier calls, since those tokens
+    were already accounted for in a previous agent_runs row (or never billed this run)."""
+    usages = []
+    for message in messages[prior_len:]:
+        usage = getattr(message, "usage_metadata", None)
+        if usage:
+            usages.append(usage)
+    return usages
+
+
+def _aggregate_usage(usage_records: list[dict[str, int]]) -> tuple[int | None, int | None, int | None, int | None]:
+    """(context_length, input_tokens, output_tokens, total_tokens) - all None when no
+    LLM call in the run reported usage_metadata at all."""
+    if not usage_records:
+        return None, None, None, None
+    input_tokens = sum(usage.get("input_tokens") or 0 for usage in usage_records)
+    output_tokens = sum(usage.get("output_tokens") or 0 for usage in usage_records)
+    context_length = max((usage.get("input_tokens") or 0 for usage in usage_records), default=0)
+    return context_length, input_tokens, output_tokens, input_tokens + output_tokens
+
+
 async def run_agent(
     role: str,
     text: str,
@@ -51,11 +91,13 @@ async def run_agent(
     require_tool_counts: dict[str, int] | None = None,
     required_menu_slots: set[tuple[str, str]] | None = None,
     response_format: type | None = None,
-) -> str:
+) -> AgentReply:
     """Run one agent turn. `trace=True` is a debug aid (see cli.py) that returns a
     human-readable event-by-event transcript instead of the model's actual reply or
     structured_response — never pass it where the result is parsed programmatically
-    (e.g. jobs.py's JSON validation), or you'll get a result that can't be parsed.
+    (e.g. jobs.py's JSON validation), or you'll get a result that can't be parsed. A
+    `trace=True` reply's token-usage fields are always `None` - the debug streaming
+    path doesn't track them, and nothing that cares about telemetry passes trace=True.
 
     `require_tools` names tools a scheduled job must call (e.g. `add_weekly_menu_item`);
     if the run ends without them, up to `_MAX_FOLLOWUPS` corrective turns are sent, then
@@ -92,14 +134,17 @@ async def run_agent(
 
         history = await load_history(session_id, settings) if remember else []
         messages: list[Any] = [*history, {"role": "user", "content": text}]
+        usage_records: list[dict[str, int]] = []
 
         if trace:
             result_messages = await _stream_agent(agent, messages)
             structured_response = None
         else:
+            prior_len = len(messages)
             result = await agent.ainvoke({"messages": messages}, {"recursion_limit": _RECURSION_LIMIT})
             result_messages = result["messages"]
             structured_response = result.get("structured_response")
+            usage_records.extend(_usage_from_new_messages(result_messages, prior_len))
 
             for attempt in range(1, _MAX_FOLLOWUPS + 1):
                 shortfalls = _all_shortfalls(job_name, require_tools, require_tool_counts, required_menu_slots, result_messages)
@@ -116,12 +161,14 @@ async def run_agent(
                     "and if a piece of optional context (favourite recipes, chef note) "
                     "was empty, proceed without it. Do it now, then reply with a short summary."
                 )
+                prior_len = len(result_messages) + 1
                 result = await agent.ainvoke(
                     {"messages": [*result_messages, {"role": "user", "content": nudge}]},
                     {"recursion_limit": _RECURSION_LIMIT},
                 )
                 result_messages = result["messages"]
                 structured_response = result.get("structured_response")
+                usage_records.extend(_usage_from_new_messages(result_messages, prior_len))
 
             shortfalls = _all_shortfalls(job_name, require_tools, require_tool_counts, required_menu_slots, result_messages)
             if shortfalls:
@@ -135,6 +182,7 @@ async def run_agent(
             # explicitly, for a plain-text wrap-up so the agent_runs row is meaningful.
             if structured_response is None and not _last_assistant_text(result_messages):
                 logger.info("Job %s made its writes but produced no summary; requesting one", job_name)
+                prior_len = len(result_messages) + 1
                 result = await agent.ainvoke(
                     {"messages": [*result_messages, {"role": "user", "content": (
                         "Reply now in plain text — no more tool calls — with a 2 to 3 sentence "
@@ -145,17 +193,27 @@ async def run_agent(
                 )
                 result_messages = result["messages"]
                 structured_response = result.get("structured_response")
+                usage_records.extend(_usage_from_new_messages(result_messages, prior_len))
 
         if remember:
             await save_history(session_id, result_messages, settings)
 
+        context_length, input_tokens, output_tokens, total_tokens = _aggregate_usage(usage_records)
+
         if trace:
-            return _format_trace(result_messages)
-        if structured_response is not None:
-            if isinstance(structured_response, BaseModel):
-                return structured_response.model_dump_json()
-            return str(structured_response)
-        return _final_text(result_messages)
+            reply_text = _format_trace(result_messages)
+        elif structured_response is not None:
+            reply_text = structured_response.model_dump_json() if isinstance(structured_response, BaseModel) else str(structured_response)
+        else:
+            reply_text = _final_text(result_messages)
+
+        return AgentReply(
+            text=reply_text,
+            context_length=context_length,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
     finally:
         await dispose_model(model)
 

@@ -121,3 +121,23 @@
 .tag-cloud-chip.excluded{background:#f2d4ca;color:#984c39;box-shadow:inset 2px 2px 4px var(--shadow-dark),inset -2px -2px 4px var(--shadow-light)}
 .tag-cloud-legend{margin:0 0 18px;color:var(--muted);font-size:10px}
 @media(max-width:650px){.skip-grid{grid-template-columns:70px repeat(4,1fr);gap:4px}.skip-day-label{font-size:9px}.skip-cell{padding:8px 0}}
+.usage-chart-card{padding:24px 26px 16px}
+.usage-bar-chart{display:flex;align-items:stretch;gap:14px;height:220px;padding-top:6px}
+.usage-bar-col{flex:1;display:flex;flex-direction:column;align-items:center;min-width:0}
+.usage-bar-value{margin-bottom:8px;color:var(--muted);font:9px 'DM Mono',monospace}
+.usage-bar-track{flex:1;display:flex;align-items:flex-end;width:100%;max-width:44px}
+.usage-bar-fill{width:100%;min-height:4px;border-radius:8px 8px 4px 4px;background:var(--green);transition:height .25s ease}
+.usage-bar-label{margin-top:9px;color:var(--muted);font:9px 'DM Mono',monospace;text-transform:uppercase;white-space:nowrap}
+.usage-chart-caption{margin:16px 0 0;color:var(--muted);font-size:10px;text-align:center}
+.usage-metrics-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:17px}
+.usage-metric-card{padding:22px 24px}
+.usage-metric-card h4{margin:0 0 14px;color:var(--green);font-size:12px;letter-spacing:-.02em}
+.usage-metric-head,.usage-metric-row{display:grid;grid-template-columns:1.3fr repeat(4,.8fr);gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid #d2d6d0}
+.usage-metric-head>*:not(:first-child),.usage-metric-row>*:not(:first-child){text-align:right;font-variant-numeric:tabular-nums}
+.usage-metric-row:last-of-type{border-bottom:0}
+.usage-metric-head{color:var(--muted);font:9px 'DM Mono',monospace;text-transform:uppercase;letter-spacing:.03em}
+.usage-metric-row{font-size:11px}
+.usage-metric-row.overall-row{color:var(--green);font-weight:700}
+.usage-metric-empty{margin:10px 0 0;color:var(--muted);font-size:11px}
+@media(max-width:900px){.usage-metrics-grid{grid-template-columns:1fr}}
+@media(max-width:650px){.usage-bar-chart{gap:7px}.usage-bar-value,.usage-bar-label{font-size:8px}.usage-metric-head span:nth-child(1),.usage-metric-row span:first-child{overflow:hidden;text-overflow:ellipsis}}

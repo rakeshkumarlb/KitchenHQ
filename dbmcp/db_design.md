@@ -160,8 +160,14 @@ Best-effort telemetry for agent jobs, both scheduled and on-demand (`agents/app/
 | `status` | TEXT | `completed` \| `failed` |
 | `result` | TEXT | Result summary |
 | `error` | TEXT | Error detail, if failed |
+| `context_length` | INTEGER | Peak single-LLM-call prompt size (tokens) seen anywhere in the run - how close it got to the model's context window. `NULL` when the provider didn't report `usage_metadata` (best-effort, e.g. some Ollama versions). |
+| `input_tokens` | INTEGER | Prompt tokens summed across every LLM call in the run (initial call + any corrective nudges + the wrap-up summary ask). `NULL` when unavailable. |
+| `output_tokens` | INTEGER | Completion tokens summed the same way. `NULL` when unavailable. |
+| `total_tokens` | INTEGER | `input_tokens + output_tokens` for the run. `NULL` when unavailable. |
 | `started_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | Start time |
 | `finished_at` | DATETIME DEFAULT CURRENT_TIMESTAMP | End time |
+
+`GET /api/agent-runs/usage-summary?days=7` returns day-by-day totals (runs/completed/failed counts, summed tokens, peak context) for the last N days - chatui's Usage Stats page renders this as a bar chart. `GET /api/agent-runs/usage-breakdown` returns all-time MIN/MAX/AVG/COUNT per token metric, both `overall` and per `agent_role` - chatui renders this as the page's tabular summary. Both aggregate in SQL (SQLite's aggregate functions skip `NULL`s), so a run with no usage data never skews the numbers, it's just excluded from `count`.
 
 ### `chat_sessions`
 Durable storage for the Executive Chef chat transcript per browser/session, so restarts and multiple `chatui` instances don't lose conversation history.

@@ -218,7 +218,7 @@ async def run_job(job_name: str, settings: Settings) -> str:
         await record_skipped_menu_slots(settings, sorted(ALL_MENU_SLOTS - required_menu_slots))
     logger.info("Running job: %s (role=%s)", job_name, role)
     try:
-        result = await run_agent(
+        reply = await run_agent(
             role, request, settings,
             remember=False, trace=False, job_name=job_name,
             require_tools=JOB_REQUIRED_TOOLS.get(job_name),
@@ -226,6 +226,7 @@ async def run_job(job_name: str, settings: Settings) -> str:
             required_menu_slots=required_menu_slots,
             response_format=result_model,
         )
+        result = reply.text
         if result_model is not None:
             # Best-effort sanity check on the model's structured summary, not a check
             # that the job did its job - the DB writes already happened via tool calls
@@ -250,7 +251,11 @@ async def run_job(job_name: str, settings: Settings) -> str:
                 settings, target_days[0]["date"], target_days[-1]["date"],
                 planning_snapshot["skip_meals"], planning_snapshot["chef_note"], planning_snapshot["restrictions"],
             )
-        await record_agent_run(role, job_name, "completed", settings, result=result)
+        await record_agent_run(
+            role, job_name, "completed", settings, result=result,
+            context_length=reply.context_length, input_tokens=reply.input_tokens,
+            output_tokens=reply.output_tokens, total_tokens=reply.total_tokens,
+        )
         return result
     except Exception as error:
         logger.exception("Job %s failed", job_name)

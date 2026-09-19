@@ -98,7 +98,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             )
         except Exception as error:
             raise HTTPException(status_code=502, detail=f"Chef service unavailable: {error}") from error
-    return ChatResponse(reply=reply, session_id=request.session_id)
+    return ChatResponse(reply=reply.text, session_id=request.session_id)
 
 
 @app.get("/jobs")

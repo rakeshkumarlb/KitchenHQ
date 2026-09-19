@@ -228,6 +228,16 @@ async def invoke_automation(job_name: str) -> dict:
     return await agent_request("POST", f"/invoke/{job_name}", timeout=300)
 
 
+@app.get("/api/usage-stats/daily")
+async def usage_stats_daily() -> list[dict]:
+    return await db_request("GET", "/api/agent-runs/usage-summary?days=7")
+
+
+@app.get("/api/usage-stats/breakdown")
+async def usage_stats_breakdown() -> dict:
+    return await db_request("GET", "/api/agent-runs/usage-breakdown")
+
+
 app.mount("/", StaticFiles(directory=Path(__file__).with_name("dist"), html=True), name="chatui")
 
 

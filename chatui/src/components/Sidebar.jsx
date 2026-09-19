@@ -1,4 +1,4 @@
-import { BookOpen, ChefHat, ClipboardCheck, LayoutDashboard, MessageCircle, Package, PanelLeftClose, PanelLeftOpen, Soup, UserRound, Workflow } from 'lucide-react';
+import { Activity, BookOpen, ChefHat, ClipboardCheck, LayoutDashboard, MessageCircle, Package, PanelLeftClose, PanelLeftOpen, Soup, UserRound, Workflow } from 'lucide-react';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -8,6 +8,7 @@ const navItems = [
   { id: 'tasks', label: 'Task List', icon: ClipboardCheck },
   { id: 'chat', label: 'Chat', icon: MessageCircle },
   { id: 'automations', label: 'Automations', icon: Workflow },
+  { id: 'usage', label: 'Usage Stats', icon: Activity },
   { id: 'profile', label: 'Profile', icon: UserRound },
 ];
 

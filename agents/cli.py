@@ -44,7 +44,7 @@ async def interactive_chat() -> None:
             continue
         try:
             reply = await run_agent("executive_chef", text, settings, trace=show_trace)
-            print(f"Chef: {reply}")
+            print(f"Chef: {reply.text}")
         except Exception as error:
             logger.exception("Interactive request failed")
             print(f"Chef error: {error}")

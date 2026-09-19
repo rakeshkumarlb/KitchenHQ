@@ -774,3 +774,83 @@ def test_chat_session_roundtrip(client):
     client.put("/api/chat-sessions/session-1", json={"messages": replaced})
     fetched_again = client.get("/api/chat-sessions/session-1").json()
     assert fetched_again["messages"] == replaced
+
+
+def test_agent_run_records_token_stats_and_usage_summary(client):
+    with_usage = client.post("/api/agent-runs", json={
+        "agent_role": "executive_chef",
+        "job_name": "weekly_menu",
+        "status": "completed",
+        "result": "ok",
+        "context_length": 4200,
+        "input_tokens": 5000,
+        "output_tokens": 800,
+        "total_tokens": 5800,
+    }).json()
+    assert with_usage["context_length"] == 4200
+    assert with_usage["input_tokens"] == 5000
+    assert with_usage["output_tokens"] == 800
+    assert with_usage["total_tokens"] == 5800
+
+    # A provider that didn't report usage_metadata (e.g. some Ollama versions) must
+    # still record the run, with the token columns coming back null - never a reason
+    # to fail the run.
+    without_usage = client.post("/api/agent-runs", json={
+        "agent_role": "sous_chef",
+        "job_name": "nightly_prep",
+        "status": "completed",
+        "result": "ok",
+    }).json()
+    assert without_usage["context_length"] is None
+    assert without_usage["total_tokens"] is None
+
+    assert len(client.get("/api/agent-runs?limit=1").json()) == 1
+
+    summary = client.get("/api/agent-runs/usage-summary").json()
+    assert len(summary) == 1
+    today = summary[0]
+    assert today["total_runs"] == 2
+    assert today["completed_runs"] == 2
+    assert today["failed_runs"] == 0
+    assert today["input_tokens"] == 5000
+    assert today["output_tokens"] == 800
+    assert today["total_tokens"] == 5800
+    assert today["max_context_length"] == 4200
+
+
+def test_agent_runs_usage_breakdown_min_max_avg_overall_and_by_role(client):
+    client.post("/api/agent-runs", json={
+        "agent_role": "executive_chef", "job_name": "weekly_menu", "status": "completed", "result": "ok",
+        "context_length": 4000, "input_tokens": 4000, "output_tokens": 400, "total_tokens": 4400,
+    })
+    client.post("/api/agent-runs", json={
+        "agent_role": "executive_chef", "job_name": "weekly_menu", "status": "completed", "result": "ok",
+        "context_length": 6000, "input_tokens": 6000, "output_tokens": 600, "total_tokens": 6600,
+    })
+    client.post("/api/agent-runs", json={
+        "agent_role": "sous_chef", "job_name": "nightly_prep", "status": "completed", "result": "ok",
+        "context_length": 1000, "input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100,
+    })
+    # A run with no usage data must not skew min/max/avg or be counted in `count`.
+    client.post("/api/agent-runs", json={
+        "agent_role": "sous_chef", "job_name": "nightly_prep", "status": "completed", "result": "ok",
+    })
+
+    breakdown = client.get("/api/agent-runs/usage-breakdown").json()
+
+    overall = breakdown["overall"]["total_tokens"]
+    assert overall["min"] == 1100
+    assert overall["max"] == 6600
+    assert overall["avg"] == round((4400 + 6600 + 1100) / 3)
+    assert overall["count"] == 3
+
+    chef = breakdown["by_agent"]["executive_chef"]["input_tokens"]
+    assert chef["min"] == 4000
+    assert chef["max"] == 6000
+    assert chef["avg"] == 5000
+    assert chef["count"] == 2
+
+    sous = breakdown["by_agent"]["sous_chef"]["input_tokens"]
+    assert sous["min"] == 1000
+    assert sous["max"] == 1000
+    assert sous["count"] == 1

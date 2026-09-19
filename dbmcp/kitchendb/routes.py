@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from constants import DAY_ORDER, DAYS, MEAL_TYPE_ORDER, MEAL_TYPES, day_case_sql, meal_case_sql
 from tags import TAG_CATEGORIES
@@ -262,16 +262,88 @@ def api_acknowledge_shopping(request: ShoppingAcknowledgementRequest) -> dict[st
 def api_record_agent_run(request: AgentRunRequest) -> dict[str, Any]:
     with connect() as connection:
         cursor = connection.execute(
-            "INSERT INTO agent_runs (agent_role, job_name, status, result, error) VALUES (?, ?, ?, ?, ?)",
-            (request.agent_role, request.job_name, request.status, request.result, request.error),
+            "INSERT INTO agent_runs (agent_role, job_name, status, result, error, context_length, input_tokens, output_tokens, total_tokens) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                request.agent_role, request.job_name, request.status, request.result, request.error,
+                request.context_length, request.input_tokens, request.output_tokens, request.total_tokens,
+            ),
         )
         return fetch_record_in(connection, "agent_runs", cursor.lastrowid)
 
 
 @router.get("/api/agent-runs")
-def api_agent_runs() -> list[dict[str, Any]]:
+def api_agent_runs(limit: int = Query(100, ge=1, le=500)) -> list[dict[str, Any]]:
     with connect() as connection:
-        return [dict(row) for row in connection.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT 100")]
+        return [
+            dict(row)
+            for row in connection.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT ?", (limit,))
+        ]
+
+
+@router.get("/api/agent-runs/usage-summary")
+def api_agent_runs_usage_summary(days: int = Query(7, ge=1, le=90)) -> list[dict[str, Any]]:
+    """Daywise usage totals for the last `days` days (oldest first), grouped by the
+    calendar date agent_runs.started_at falls on. Days with zero runs are omitted -
+    the caller fills gaps if it wants a complete date axis."""
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                date(started_at) AS day,
+                COUNT(*) AS total_runs,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                MAX(context_length) AS max_context_length
+            FROM agent_runs
+            WHERE started_at >= date('now', ?)
+            GROUP BY day
+            ORDER BY day ASC
+            """,
+            (f"-{days - 1} days",),
+        )
+        return [dict(row) for row in rows]
+
+
+_USAGE_METRICS = ("context_length", "input_tokens", "output_tokens", "total_tokens")
+
+
+def _usage_stats(connection, where: str = "", params: tuple[Any, ...] = ()) -> dict[str, dict[str, Any]]:
+    """MIN/MAX/AVG/COUNT for each usage metric over the rows `where` selects. SQLite's
+    aggregate functions already skip NULLs (a run whose provider never reported
+    usage_metadata), so `count` is how many runs actually had a value, not the row total."""
+    select_parts = ", ".join(
+        f"MIN({metric}) AS {metric}_min, MAX({metric}) AS {metric}_max, "
+        f"AVG({metric}) AS {metric}_avg, COUNT({metric}) AS {metric}_count"
+        for metric in _USAGE_METRICS
+    )
+    row = connection.execute(f"SELECT {select_parts} FROM agent_runs {where}", params).fetchone()
+    return {
+        metric: {
+            "min": row[f"{metric}_min"],
+            "max": row[f"{metric}_max"],
+            "avg": round(row[f"{metric}_avg"]) if row[f"{metric}_avg"] is not None else None,
+            "count": row[f"{metric}_count"],
+        }
+        for metric in _USAGE_METRICS
+    }
+
+
+@router.get("/api/agent-runs/usage-breakdown")
+def api_agent_runs_usage_breakdown() -> dict[str, Any]:
+    """All-time min/max/avg per usage metric, overall and broken down by agent_role -
+    distinct from usage-summary's day-by-day totals, which only cover the last N days."""
+    with connect() as connection:
+        overall = _usage_stats(connection)
+        roles = [
+            row["agent_role"]
+            for row in connection.execute("SELECT DISTINCT agent_role FROM agent_runs ORDER BY agent_role")
+        ]
+        by_agent = {role: _usage_stats(connection, "WHERE agent_role = ?", (role,)) for role in roles}
+        return {"overall": overall, "by_agent": by_agent}
 
 
 @router.get("/api/profile")

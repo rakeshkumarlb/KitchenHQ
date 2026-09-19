@@ -39,6 +39,8 @@ export const kitchenApi = {
   listAutomationJobs: () => request('/automations/jobs'),
   listAutomationRuns: () => request('/automations/runs'),
   invokeAutomation: (jobName) => request(`/automations/invoke/${jobName}`, { method: 'POST' }),
+  getUsageStatsDaily: () => request('/usage-stats/daily'),
+  getUsageStatsBreakdown: () => request('/usage-stats/breakdown'),
   listRecipes: (limit, offset = 0) => request(`/recipes?${limit != null ? `limit=${limit}&offset=${offset}` : ''}`),
   getRecipe: (id) => request(`/recipes/${id}`),
   searchRecipes: (query, topK = 10) => request(`/recipes/search?q=${encodeURIComponent(query)}&top_k=${topK}`),

@@ -131,6 +131,10 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     status TEXT NOT NULL,
     result TEXT,
     error TEXT,
+    context_length INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    total_tokens INTEGER,
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     finished_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

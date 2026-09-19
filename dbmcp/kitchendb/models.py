@@ -110,6 +110,10 @@ class AgentRunRequest(BaseModel):
     status: str = Field(pattern="^(completed|failed)$")
     result: str = ""
     error: str = ""
+    context_length: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class ChatSessionRequest(BaseModel):
