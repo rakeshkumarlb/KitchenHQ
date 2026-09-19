@@ -10,10 +10,11 @@ It's a small, self-hostable stack of three services you run with one `docker com
 
 Feeding a family is a logistics problem that repeats every single day: *what are we eating, what needs defrosting tonight, what's about to run out, what goes on the list.* KitchenHQ turns that recurring load into a set of background jobs and a conversation.
 
-- **Plan once a week, not every morning.** The Executive Chef agent reads your inventory and household preferences and writes a full Monday–Sunday menu — breakfast, lunch, snack, dinner — that respects your dietary rules and 20-minute weekday prep cap.
+- **Plan once a week, not every morning.** The Executive Chef agent reads your inventory and household preferences and writes a full Monday–Sunday menu — breakfast, lunch, snack, dinner — searching your own recipe catalog for a match before inventing anything, and respecting your dietary rules and prep-time caps.
 - **Wake up to a plan, not a decision.** Nightly and morning jobs turn each day's menu into an ordered, time-capped prep checklist and a parallel cooking plan.
 - **The pantry stays truthful.** Completing a prep task deducts exactly what it used from inventory. When stock dips below its threshold, the Pantry Manager drafts a shopping list — merged, de-duplicated, ready to check off.
-- **Everything is inspectable.** Every scheduled run is recorded with its tool calls, output, and success/failure. Nothing happens in a black box.
+- **Nobody grades their own homework.** A fourth agent, the Food Inspector, never plans anything — it scores every menu slot, weekly plan, prep task, and recipe the other three save, against the household's own rules, and leaves a written reason.
+- **Everything is inspectable.** Every scheduled run is recorded with its tool calls, output, token usage, and success/failure. Nothing happens in a black box.
 
 ---
 
@@ -21,9 +22,11 @@ Feeding a family is a logistics problem that repeats every single day: *what are
 
 | | |
 |---|---|
-| 🧑‍🍳 **Three specialist agents** | Executive Chef (weekly menu), Sous Chef (prep & cooking plans), Pantry Manager (shopping) — each with its own lane, sharing one toolset over MCP. |
-| ⏰ **In-process cron** | 6 jobs on an `AsyncIOScheduler` inside the API process — no extra worker container, no network hop. Fire any of them on demand from the UI. |
+| 🧑‍🍳 **Four specialist agents** | Executive Chef (weekly menu), Sous Chef (prep & cooking plans), Pantry Manager (shopping), Food Inspector (audits everyone else's work) — each with its own lane, sharing one toolset over MCP. |
+| ⏰ **In-process cron** | 11 jobs on an `AsyncIOScheduler` inside the API process — no extra worker container, no network hop. Fire any of them on demand from the UI. |
 | 💬 **Chat with the chef** | Ask for a swap, a substitution, a "what can I make with what's in the fridge" — full conversation history, persisted, resumable. |
+| 📖 **Searchable recipe catalog** | One SQLite row per recipe holds the structured recipe, its embedding, and your rating together — `search_recipes` blends keyword and semantic search with no separate vector database. |
+| 🕵️ **LLM-as-judge auditing** | The Food Inspector scores every saved menu slot, weekly plan, prep task, and recipe against your household's own configurable rules — never a hardcoded checker. |
 | 📧 **Agent-driven email** | Opt-in SMTP: the agents email you the weekly plan, tonight's prep, or the shopping list. Never automatic, never blocks a job. |
 | 🔒 **One-key auth** | A single shared secret gates every REST and MCP request across all three services. |
 | 🗄️ **Honest inventory** | Propose-then-acknowledge writes with idempotency keys — replays never double-count stock. |
@@ -120,26 +123,32 @@ Prompts live in `agents/prompts/*.md`. `system.md` is a role-neutral shared base
 
 | Role | Owns | Structured output |
 |---|---|---|
-| **Executive Chef** | The weekly menu — 28 slots, full recipes, macros, policy-validated. Consults household favourites before planning. Chat with the chef stays free-text. | `ExecutiveChefResult` (weekly-menu job only) |
+| **Executive Chef** | The weekly menu — 28 slots, full recipes, macros, described in household-facing language. Searches the recipe catalog before inventing a dish, and owns that catalog from chat (add / find / update / rate a recipe). Chat with the chef stays free-text. | `ExecutiveChefResult` (weekly-menu job only) |
 | **Sous Chef** | Prep schedules and parallel cooking plans, each capped in minutes. Records exactly what each task will consume so inventory can deduct on completion. | `SousChefResult` |
 | **Pantry Manager** | The pending shopping list — what's below threshold or short for the week, upserted so add-vs-append is never a choice. | `PantryManagerResult` |
+| **Food Inspector** | Never plans anything — audits what the other three already saved (menu slots, whole-week plans, prep tasks, recipes) and records a 0–100 score plus written feedback on each. Scheduled/automation-only, no chat persona. | `FoodInspectorResult` |
 
-All three get the identical MCP toolset — role boundaries are enforced by the prompt, not by hiding tools. Each run also gets a locally-built `get_job_context` tool: the authoritative source for date math and the *intent* behind a scheduled run.
+All four get the identical MCP toolset — role boundaries are enforced by the prompt, not by hiding tools. Each run also gets a locally-built `get_job_context` tool: the authoritative source for date math and the *intent* behind a scheduled run.
 
 ### Scheduled jobs
 
-Six cron jobs fire in-process (`agents/app/scheduler.py`). Times are in `KITCHEN_TIMEZONE` (default `Asia/Kolkata`). Every one is also a `POST /invoke/{job_name}` you can trigger from the **Automations** page to see its output immediately.
+Eleven cron jobs fire in-process (`agents/app/scheduler.py`). Times are in `KITCHEN_TIMEZONE` (default `Asia/Kolkata`). Every one is also a `POST /invoke/{job_name}` you can trigger from the **Automations** page to see its output immediately.
 
 | Job | Role | Schedule | What it does |
 |---|---|---|---|
-| `weekly_menu` | Executive Chef | Sat 10:00 | Replace the saved menu with a fresh, complete Mon–Sun week; validate against household policy. |
+| `weekly_menu` | Executive Chef | Sat 10:00 | Replace the saved menu with a fresh, complete Mon–Sun week. |
 | `sunday_prep` | Sous Chef | Sun 14:00 | One 60-minute batch-prep session for the week ahead. |
 | `nightly_prep` | Sous Chef | daily 20:00 | A ≤10-minute task tonight so tomorrow's breakfast & lunch are quick. |
 | `morning_cooking` | Sous Chef | Mon–Fri 06:30 | A parallel cooking plan for the breakfast & lunch being made now. |
 | `dinner_cooking` | Sous Chef | Mon–Fri 18:00 | A parallel cooking plan for tonight's snack & dinner. |
 | `pantry_manager` | Pantry Manager | daily 18:00 | Propose a shopping list for whatever's running low or needed for the week. |
+| `expire_prep_tasks` | Sous Chef | every 2 hours | Deterministic housekeeping — flip any prep task nobody acted on within 2 hours to `expired`. |
+| `menu_audit` | Food Inspector | daily 22:30 | Score every unaudited weekly-menu slot against household rules and preferences. |
+| `weekly_plan_audit` | Food Inspector | daily 22:35 | Score whole-week completeness and week-scope rules (e.g. lunch variety) against the context that week was actually planned under. |
+| `task_audit` | Food Inspector | daily 22:45 | Score every unaudited prep task, including cancelled ones — the decision is judged, not whether it happened. |
+| `recipe_audit` | Food Inspector | daily 23:00 | Score every unaudited catalog recipe against recipe-catalog standards only (tags, instruction quality) — independent of any household's preferences. |
 
-If a job stops short of its required DB writes, `run_agent` sends corrective nudges and then **raises** — a job that saved 22 of 28 menu slots is recorded `failed` with the shortfall, never a blank `completed`. Telemetry for every run (success or failure) is posted to `dbmcp`.
+If a job stops short of its required DB writes, `run_agent` sends corrective nudges and then **raises** — a job that saved 22 of 28 menu slots is recorded `failed` with the shortfall, never a blank `completed`. Telemetry for every run (success or failure) — including token/context usage — is posted to `dbmcp` and visible on the **Usage Stats** page.
 
 ---
 
@@ -148,23 +157,26 @@ If a job stops short of its required DB writes, `run_agent` sends corrective nud
 One React app, no router — `App.jsx` switch-renders each page from a single `/api/dashboard` payload, patched locally after each mutation.
 
 - **Dashboard** — the week at a glance: today's meals, open tasks, low-stock count.
-- **Weekly Menu** — every slot with ingredients and full recipe, rendered as lists.
+- **Weekly Menu** — every slot with ingredients and full recipe, plus its Food Inspector score/feedback badge.
+- **Recipes** — the household's searchable catalog: rate a recipe, or ask the Executive Chef in one click to refresh its tags or rewrite its instructions (feeding it the Food Inspector's own feedback as context).
 - **Pantry** — read-only inventory with thresholds and last-updated.
-- **Tasks** — prep schedules; checking one complete deducts its ingredients from inventory.
+- **Tasks** — prep schedules; checking one complete deducts its ingredients from inventory. Also scored by the Food Inspector.
 - **Chat** — talk to the Executive Chef; list and resume the 5 most recent conversations.
 - **Automations** — every scheduled job, its recent runs, and a "run now" button per job.
-- **Profile** — the single household record: name (drives the greeting), email (where notifications go), notification toggle, chef notes.
+- **Usage Stats** — daily and all-time token/context usage, broken down per agent role.
+- **Profile** — the single household record: name (drives the greeting), email (where notifications go), notification toggle, household members, restrictions, and chef notes.
 
 ---
 
 ## Data model notes
 
-`dbmcp/init_db.py` is one file that defines the schema + self-migration (idempotent `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN` backfills on startup), the `@mcp.tool()` data operations, and the REST wrappers around them. `dbmcp/db_design.md` documents the same schema for humans; if the two disagree, `init_db.py` wins.
+`dbmcp/schema.sql` is the single source of truth for the schema — a fresh-start `CREATE TABLE IF NOT EXISTS` script with no in-place migration of older layouts. `kitchendb/tools/*.py` holds the data operations as plain functions, added once to a `FastMCP` instance (`/mcp`) and re-exposed as thin REST routes (`/api/*`) from the same FastAPI app. `dbmcp/db_design.md` documents the same schema for humans; if the two disagree, `schema.sql` wins.
 
 - **Inventory writes are propose-then-acknowledge.** The propose step never touches `inventory`; the acknowledge step is idempotent via a required `acknowledgement_key`. Replays return `{"replayed": true}` instead of double-counting.
 - **There is no "shopping list" entity** — `shopping_items` *is* the one pending list, unique on `item_name`. `add_shopping_items` is an upsert; acknowledging a purchase adds the real quantity to `inventory` and deletes the row.
 - **Prep deduction doesn't guard on stock** — a deduction always applies and can leave a visible negative balance until a shopping run. This is intentional.
 - **The weekly menu has no deterministic policy check** — `user_profile.restrictions` (household-editable on the Profile page; each entry scoped `per_meal` or `week`) is the only rule source. The Executive Chef reads it via `get_household_preferences` while planning, and the Food Inspector reads the same thing while auditing (`menu_audit` for per-meal rules, `weekly_plan_audit` for week-scope ones like lunch variety) — there is no synchronous gate before a plan is saved or emailed.
+- **Recipes are one row each, search vector included.** A `recipes` row holds the structured recipe, its embedding, and a rating together — `add_recipe`/`update_recipe` recompute the embedding synchronously, so `search_recipes` (hybrid keyword + semantic, no external vector store) can never search a stale vector.
 
 ### Backups
 
@@ -181,7 +193,7 @@ Safe under concurrent writers (SQLite online-backup API). Schedule it daily via 
 Each service has its own `requirements.txt` / `package.json` and its own README with details.
 
 ```bash
-# dbmcp — creates/migrates kitchen.db on startup, serves REST + MCP on :18000
+# dbmcp — creates/seeds kitchen.db on startup, serves REST + MCP on :18000
 cd dbmcp && pip install -r requirements.txt
 KITCHENHQ_API_KEY=... python init_db.py
 
